@@ -1,4 +1,4 @@
-use super::types::*;
+﻿use super::types::*;
 use crate::config::ClaudeAccount;
 use crate::mcp::McpManager;
 use crate::project::ProjectManager;
@@ -749,6 +749,250 @@ pub async fn run_claude_web_turn(
         }
     }));
 
+    // --- Full Windows PC Access & Dynamic Tool Extension ---
+    tools_json_array.push(json!({
+        "name": "powershell_exec",
+        "description": "Execute any PowerShell command or multi-line script on Windows with full access to processes, services, WMI, COM objects, network, and file system. Returns unclipped stdout/stderr.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "PowerShell command or script to execute" },
+                "working_directory": { "type": "string", "description": "Optional working directory" }
+            },
+            "required": ["command"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "cmd_exec",
+        "description": "Execute any command directly in Windows cmd.exe /c (supports batch files, shell built-ins, and utilities).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "The command string to execute in cmd.exe" },
+                "working_directory": { "type": "string", "description": "Optional working directory" }
+            },
+            "required": ["command"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "read_clipboard",
+        "description": "Read the current text content from the Windows clipboard.",
+        "input_schema": {
+            "type": "object",
+            "properties": {}
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "write_clipboard",
+        "description": "Copy text directly into the Windows clipboard.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "description": "Text to write to clipboard" }
+            },
+            "required": ["text"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "capture_screen",
+        "description": "Capture a full screenshot of the user's primary monitor. Saves as a PNG and returns resolution, file size, and the saved file path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "save_path": { "type": "string", "description": "Optional file path to save screenshot (defaults to temp directory)" }
+            }
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "list_processes",
+        "description": "List running Windows processes with PID, Process Name, Memory (MB), and main window title. Supports filtering.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filter": { "type": "string", "description": "Optional process name or title filter (e.g. 'Roblox', 'chrome', 'node')" }
+            }
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "kill_process",
+        "description": "Forcefully terminate a running Windows process by PID or process name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pid": { "type": "integer", "description": "PID to kill" },
+                "name": { "type": "string", "description": "Process name to kill (e.g. 'RobloxStudioBeta.exe')" }
+            }
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "list_windows",
+        "description": "List all active application windows open on the desktop with their process IDs and window titles.",
+        "input_schema": {
+            "type": "object",
+            "properties": {}
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "get_system_resources",
+        "description": "Get real-time CPU logical cores, RAM usage/free (GB), and storage drive capacities/free space across all disks.",
+        "input_schema": {
+            "type": "object",
+            "properties": {}
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "read_registry",
+        "description": "Read Windows Registry keys and values (e.g. 'HKCU\\Software\\Roblox').",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Registry key path" },
+                "value_name": { "type": "string", "description": "Optional specific value name to read" }
+            },
+            "required": ["path"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "write_registry",
+        "description": "Write or create a Windows Registry key/value.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Registry key path" },
+                "value_name": { "type": "string", "description": "Value name" },
+                "value_type": { "type": "string", "enum": ["REG_SZ", "REG_DWORD", "REG_MULTI_SZ", "REG_EXPAND_SZ", "REG_BINARY"], "description": "Value type (default REG_SZ)" },
+                "value_data": { "type": "string", "description": "Data to store" }
+            },
+            "required": ["path", "value_name", "value_data"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "check_port",
+        "description": "Check if a TCP port is in use on localhost, and find which process PID is holding it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "port": { "type": "integer", "description": "Port number to check (e.g. 3000, 8080)" }
+            },
+            "required": ["port"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "kill_port",
+        "description": "Free a locked port by forcefully terminating whichever process is listening on it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "port": { "type": "integer", "description": "Port number to free" }
+            },
+            "required": ["port"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "web_search",
+        "description": "Search the web for documentation, solutions, error messages, and package details without API keys.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "The search query string" },
+                "max_results": { "type": "integer", "description": "Maximum results to return (default 5)" }
+            },
+            "required": ["query"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "get_env_variable",
+        "description": "Get the value of an environment variable on the system.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Environment variable name" }
+            },
+            "required": ["name"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "set_env_variable",
+        "description": "Set an environment variable for the application process.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Variable name" },
+                "value": { "type": "string", "description": "Variable value" }
+            },
+            "required": ["name", "value"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "file_search_glob",
+        "description": "Fast recursive search for files matching a pattern or extension anywhere on any drive (e.g. search_root: 'C:\\Users\\...', pattern: '*.lua').",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "search_root": { "type": "string", "description": "Root directory to search (supports absolute paths or env vars)" },
+                "pattern": { "type": "string", "description": "Glob or file extension pattern (e.g. '*.lua', 'config.json', '*test*')" },
+                "max_results": { "type": "integer", "description": "Maximum results to return (default 40)" }
+            },
+            "required": ["search_root", "pattern"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "define_custom_tool",
+        "description": "Dynamically create and register a new tool in the app on the fly. The new tool can be written in PowerShell, Python, JavaScript/Node, or CMD batch, and immediately becomes executable by you or the user.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Unique tool name (e.g. 'clean_temp_builds', 'query_game_api')" },
+                "description": { "type": "string", "description": "Clear description of what the tool does" },
+                "input_schema": { "type": "object", "description": "JSON Schema object defining the tool parameters" },
+                "interpreter": { "type": "string", "enum": ["powershell", "python", "cmd", "node"], "description": "Interpreter/runtime to execute the tool code (default: powershell)" },
+                "script": { "type": "string", "description": "The executable script code. Use {{param}} or  to access parameters." }
+            },
+            "required": ["name", "description", "script"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "list_custom_tools",
+        "description": "List all dynamically created custom tools currently registered in the app.",
+        "input_schema": {
+            "type": "object",
+            "properties": {}
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "delete_custom_tool",
+        "description": "Delete a dynamically created custom tool by name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Name of the tool to remove" }
+            },
+            "required": ["name"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "install_mcp_package",
+        "description": "Install and auto-register an MCP server package (e.g. via npm or pip) and add it to claude_desktop_config.json so its tools become available.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "package": { "type": "string", "description": "Package name to install (e.g. '@modelcontextprotocol/server-filesystem')" },
+                "server_name": { "type": "string", "description": "Optional name for the server entry" },
+                "type": { "type": "string", "enum": ["npm", "python"], "description": "Package manager type (default npm)" }
+            },
+            "required": ["package"]
+        }
+    }));
+
+    // Dynamically register any persistent custom tools
+    let dynamic_tool_mgr = crate::tools::DynamicToolManager::new(active_folder.as_deref().unwrap_or("."));
+    for ct in dynamic_tool_mgr.list_tools() {
+        tools_json_array.push(json!({
+            "name": ct.name,
+            "description": format!("[Custom Tool: {}] {}", ct.interpreter, ct.description),
+            "input_schema": ct.input_schema
+        }));
+    }
     // Add all connected MCP tools (including Roblox Studio MCP)
     for t in &mcp_tools {
         tools_json_array.push(json!({
@@ -1880,14 +2124,163 @@ async fn execute_tool(
             (format!("System Information:\n- OS: {} ({})\n- Computer: {}\n- User: {}\n- Working Directory: {}\n- Active Project: {}",
                 os_name, arch, computer, user, cwd, active_folder.unwrap_or("None")), false)
         }
-        _ => {
-            // MCP tool (e.g. Roblox Studio tools: list_roblox_studios, search_game_tree, execute_luau, etc.)
-            match mcp_manager.call_tool(name, args.clone()).await {
-                Ok(val) => {
-                    let (formatted, is_err) = crate::mcp::types::format_mcp_call_result(&val);
-                    (formatted, is_err)
+        "powershell_exec" => {
+            let cmd = args.get("command").or_else(|| args.get("script")).and_then(|c| c.as_str()).unwrap_or("");
+            let wd = args.get("working_directory").or_else(|| args.get("working_dir")).and_then(|w| w.as_str()).or(active_folder);
+            crate::tools::execute_powershell(cmd, wd, 60)
+        }
+        "cmd_exec" => {
+            let cmd = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            let wd = args.get("working_directory").or_else(|| args.get("working_dir")).and_then(|w| w.as_str()).or(active_folder);
+            crate::tools::execute_cmd(cmd, wd)
+        }
+        "read_clipboard" => {
+            crate::tools::get_clipboard_text()
+        }
+        "write_clipboard" => {
+            let text = args.get("text").or_else(|| args.get("content")).and_then(|t| t.as_str()).unwrap_or("");
+            crate::tools::set_clipboard_text(text)
+        }
+        "capture_screen" => {
+            let save_path = args.get("save_path").or_else(|| args.get("path")).and_then(|p| p.as_str());
+            crate::tools::capture_screen(save_path)
+        }
+        "list_processes" => {
+            let filter = args.get("filter").or_else(|| args.get("name")).and_then(|f| f.as_str());
+            crate::tools::list_running_processes(filter)
+        }
+        "kill_process" => {
+            let pid = args.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32);
+            let name = args.get("name").or_else(|| args.get("process_name")).and_then(|n| n.as_str());
+            crate::tools::kill_process(pid, name)
+        }
+        "list_windows" => {
+            crate::tools::list_open_windows()
+        }
+        "get_system_resources" => {
+            crate::tools::get_system_resources()
+        }
+        "read_registry" => {
+            let path = args.get("path").or_else(|| args.get("key")).and_then(|p| p.as_str()).unwrap_or("");
+            let value_name = args.get("value_name").or_else(|| args.get("value")).and_then(|v| v.as_str());
+            crate::tools::read_registry_key(path, value_name)
+        }
+        "write_registry" => {
+            let path = args.get("path").or_else(|| args.get("key")).and_then(|p| p.as_str()).unwrap_or("");
+            let value_name = args.get("value_name").or_else(|| args.get("value")).and_then(|v| v.as_str()).unwrap_or("");
+            let value_type = args.get("value_type").or_else(|| args.get("type")).and_then(|t| t.as_str()).unwrap_or("REG_SZ");
+            let value_data = args.get("value_data").or_else(|| args.get("data")).and_then(|d| d.as_str()).unwrap_or("");
+            crate::tools::write_registry_key(path, value_name, value_type, value_data)
+        }
+        "check_port" => {
+            let port = args.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16;
+            if port == 0 {
+                ("Error: Valid port number (1-65535) required.".to_string(), true)
+            } else {
+                crate::tools::check_port_status(port)
+            }
+        }
+        "kill_port" => {
+            let port = args.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16;
+            if port == 0 {
+                ("Error: Valid port number (1-65535) required.".to_string(), true)
+            } else {
+                crate::tools::kill_port_owner(port)
+            }
+        }
+        "web_search" => {
+            let query = args.get("query").or_else(|| args.get("q")).and_then(|q| q.as_str()).unwrap_or("");
+            let max_results = args.get("max_results").and_then(|m| m.as_u64()).unwrap_or(5) as usize;
+            crate::tools::web_search_query(query, max_results).await
+        }
+        "get_env_variable" => {
+            let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            crate::tools::get_env_var(name)
+        }
+        "set_env_variable" => {
+            let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let value = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            crate::tools::set_env_var(name, value)
+        }
+        "file_search_glob" => {
+            let search_root = args.get("search_root").or_else(|| args.get("dir")).or_else(|| args.get("path")).and_then(|s| s.as_str()).or(active_folder).unwrap_or(".");
+            let pattern = args.get("pattern").or_else(|| args.get("glob")).and_then(|p| p.as_str()).unwrap_or("*");
+            let max_results = args.get("max_results").and_then(|m| m.as_u64()).unwrap_or(40) as usize;
+            crate::tools::file_search_glob(search_root, pattern, max_results)
+        }
+        "define_custom_tool" => {
+            let tool_name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let desc = args.get("description").and_then(|d| d.as_str()).unwrap_or("");
+            let schema = args.get("input_schema").or_else(|| args.get("parameters")).cloned().unwrap_or(json!({}));
+            let interpreter = args.get("interpreter").and_then(|i| i.as_str()).unwrap_or("powershell");
+            let script = args.get("script").or_else(|| args.get("code")).or_else(|| args.get("command")).and_then(|s| s.as_str()).unwrap_or("");
+            let dyn_mgr = crate::tools::DynamicToolManager::new(active_folder.unwrap_or("."));
+            let tool = crate::tools::CustomTool {
+                name: tool_name.to_string(),
+                description: desc.to_string(),
+                input_schema: schema.clone(),
+                interpreter: interpreter.to_string(),
+                script_code: script.to_string(),
+                created_at: String::new(),
+            };
+            match dyn_mgr.save_tool(tool) {
+                Ok(msg) => {
+                    mcp_manager.add_custom_tool(crate::mcp::McpTool {
+                        server_name: "custom_tools".to_string(),
+                        name: tool_name.to_string(),
+                        description: Some(format!("{} [{}]", desc, interpreter)),
+                        input_schema: schema,
+                    }).await;
+                    (msg, false)
                 }
-                Err(e) => (format!("MCP tool error: {}", e), true),
+                Err(e) => (e, true),
+            }
+        }
+        "list_custom_tools" => {
+            let dyn_mgr = crate::tools::DynamicToolManager::new(active_folder.unwrap_or("."));
+            let tools = dyn_mgr.list_tools();
+            if tools.is_empty() {
+                ("No dynamic custom tools currently defined. Call 'define_custom_tool' to create one on the fly.".to_string(), false)
+            } else {
+                let mut out = format!("Registered Dynamic Custom Tools ({}):\n\n", tools.len());
+                for t in tools {
+                    out.push_str(&format!("- {} [{}]: {}\n", t.name, t.interpreter, t.description));
+                }
+                (out, false)
+            }
+        }
+        "delete_custom_tool" => {
+            let tool_name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let dyn_mgr = crate::tools::DynamicToolManager::new(active_folder.unwrap_or("."));
+            match dyn_mgr.delete_tool(tool_name) {
+                Ok(msg) => (msg, false),
+                Err(e) => (e, true),
+            }
+        }
+        "install_mcp_package" => {
+            let pkg = args.get("package").or_else(|| args.get("name")).and_then(|p| p.as_str()).unwrap_or("");
+            let s_name = args.get("server_name").and_then(|s| s.as_str()).unwrap_or("");
+            let t_type = args.get("type").and_then(|t| t.as_str()).unwrap_or("npm");
+            let default_cfg = crate::config::default_claude_mcp_config_path();
+            crate::tools::auto_install_mcp_package(pkg, s_name, t_type, &default_cfg)
+        }
+        _ => {
+            // First check if this is a registered dynamic custom tool
+            let dyn_mgr = crate::tools::DynamicToolManager::new(active_folder.unwrap_or("."));
+            if dyn_mgr.get_tool(name).is_some() {
+                match dyn_mgr.execute_tool(name, args) {
+                    Ok(out) => (out, false),
+                    Err(err) => (err, true),
+                }
+            } else {
+                // MCP tool (e.g. Roblox Studio tools: list_roblox_studios, search_game_tree, execute_luau, etc.)
+                match mcp_manager.call_tool(name, args.clone()).await {
+                    Ok(val) => {
+                        let (formatted, is_err) = crate::mcp::types::format_mcp_call_result(&val);
+                        (formatted, is_err)
+                    }
+                    Err(e) => (format!("MCP tool error: {}", e), true),
+                }
             }
         }
     }

@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, Provider};
+﻿use crate::config::{AppConfig, Provider};
 use crate::llm::{
     ensure_extract_script_exists, extract_claude_desktop_credentials, run_anthropic_turn,
     run_claude_web_turn, run_openai_turn, verify_claude_account, TurnEvent,
@@ -161,12 +161,14 @@ impl ClaudeDesktopApp {
         let mcp = self.mcp_manager.clone();
         let cfg_path = self.config.mcp_config_path.clone();
         let sync_tx = self.mcp_sync_tx.clone();
+        let storage_base = self.storage.base_dir().to_string_lossy().to_string();
 
         self.tokio_runtime.spawn(async move {
             let cfg = mcp.load_config_file(&cfg_path).await.unwrap_or_default();
             if connect {
                 let _ = mcp.connect_all().await;
             }
+            mcp.load_custom_tools(&storage_base).await;
             let statuses = mcp.get_statuses().await;
             let tools = mcp.get_all_tools().await;
             let _ = sync_tx.send((cfg, statuses, tools));

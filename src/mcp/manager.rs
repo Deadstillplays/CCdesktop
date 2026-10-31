@@ -1,4 +1,4 @@
-use super::client::McpClientHandle;
+﻿use super::client::McpClientHandle;
 use super::http_client;
 use super::types::*;
 use serde_json::Value;
@@ -251,6 +251,27 @@ impl McpManager {
         inner.config.clone()
     }
 
+    pub async fn add_custom_tool(&self, tool: McpTool) {
+        let mut inner = self.inner.write().await;
+        inner.tools.retain(|t| !(t.server_name == tool.server_name && t.name == tool.name));
+        inner.tools.push(tool);
+    }
+
+    pub async fn load_custom_tools(&self, base_dir: &str) {
+        let mgr = crate::tools::DynamicToolManager::new(base_dir);
+        let custom = mgr.list_tools();
+        let mut inner = self.inner.write().await;
+        inner.tools.retain(|t| t.server_name != "custom_tools");
+        for t in custom {
+            inner.tools.push(McpTool {
+                server_name: "custom_tools".to_string(),
+                name: t.name,
+                description: Some(format!("{} [{}]", t.description, t.interpreter)),
+                input_schema: t.input_schema,
+            });
+        }
+    }
+
     pub async fn call_tool(&self, tool_name: &str, arguments: Value) -> Result<Value, String> {
         self.call_tool_or_url(None, tool_name, arguments).await
     }
@@ -296,6 +317,12 @@ impl McpManager {
             let h_url = inner.http_servers.get(&s_name).cloned();
             (s_client, h_url, s_name)
         };
+
+        if server_name == "custom_tools" {
+            let mgr = crate::tools::DynamicToolManager::new(".");
+            let res = mgr.execute_tool(tool_name, &arguments)?;
+            return Ok(serde_json::Value::String(res));
+        }
 
         if let Some(client) = server_client {
             client.call_tool(tool_name, arguments).await.map_err(|e| {
@@ -360,6 +387,7 @@ impl McpManager {
             )
         };
 
+
         if let Some(client) = server_client {
             client.read_resource(uri).await
         } else if let Some(url) = http_url {
@@ -405,6 +433,7 @@ impl McpManager {
                 inner.http_servers.get(trimmed).cloned(),
             )
         };
+
 
         if let Some(client) = server_client {
             client.get_prompt(name, arguments).await

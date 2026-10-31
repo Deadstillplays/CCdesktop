@@ -6,6 +6,7 @@ mod llm;
 mod mcp;
 mod project;
 mod storage;
+mod tools;
 mod ui;
 
 use app::ClaudeDesktopApp;

@@ -3,8 +3,12 @@ use serde_json::json;
 
 #[tokio::test]
 async fn test_claude_web_models() {
-    let session_key = "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";
-    let org_uuid = "860381e3-7374-4bda-8255-5ceac6e73013";
+    let session_key = std::env::var("CLAUDE_SESSION_KEY").unwrap_or_default();
+    let org_uuid = std::env::var("CLAUDE_ORG_UUID").unwrap_or_default();
+    if session_key.is_empty() || org_uuid.is_empty() {
+        println!("Skipping live models test: CLAUDE_SESSION_KEY and CLAUDE_ORG_UUID not set");
+        return;
+    }
 
     let candidate_models = [
         "claude-3-7-sonnet-20250219",
