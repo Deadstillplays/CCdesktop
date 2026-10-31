@@ -418,7 +418,15 @@ fn get_color_image_from_base64(base64_str: &str) -> Option<egui::ColorImage> {
     use base64::Engine;
     let decoded = base64::engine::general_purpose::STANDARD.decode(base64_str.trim()).ok()?;
     let dyn_img = image::load_from_memory(&decoded).ok()?;
-    let rgba = dyn_img.to_rgba8();
+    let mut rgba = dyn_img.to_rgba8();
+    // Safety check: if all pixels have 0 alpha (common in raw GDI bitmaps/screenshots where alpha wasn't set),
+    // make them fully opaque so the image is never rendered as transparent/blank.
+    let all_zero_alpha = rgba.chunks_exact(4).all(|p| p[3] == 0);
+    if all_zero_alpha {
+        for p in rgba.chunks_exact_mut(4) {
+            p[3] = 255;
+        }
+    }
     Some(egui::ColorImage::from_rgba_unmultiplied(
         [rgba.width() as usize, rgba.height() as usize],
         rgba.as_raw(),
@@ -779,6 +787,23 @@ fn render_messages_and_input(
             let enter_pressed = !just_closed_dialog
                 && input_resp.has_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+
+            // Handle image/file paste directly when input box has focus
+            if input_resp.has_focus() {
+                let ctrl_v_in_input = ui.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V));
+                if ctrl_v_in_input {
+                    let atts = crate::ui::clipboard::ClipboardHelper::try_paste_attachments();
+                    if !atts.is_empty() {
+                        for att in atts {
+                            ui_state.pending_attachments.push(att);
+                        }
+                        ui.ctx().input_mut(|i| {
+                            i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::V, .. } | egui::Event::Paste(_)));
+                        });
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
 
             ui.add_space(4.0_f32);
             ui.horizontal(|ui| {
@@ -1354,6 +1379,7 @@ fn render_tool_call_card(ui: &mut Ui, tc: &ToolCallRecord, action: &mut ChatView
         .corner_radius(CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new("⚡").size(12.0).color(ACCENT_PEACH));
                 ui.label(
@@ -1378,10 +1404,18 @@ fn render_tool_call_card(ui: &mut Ui, tc: &ToolCallRecord, action: &mut ChatView
                 });
             });
 
-            ui.add_space(2.0_f32);
-            ui.push_id(&tc.id, |ui| {
-                ui.collapsing("Parameters & Result", |ui| {
-                    ui.add_space(3.0_f32);
+            ui.add_space(3.0_f32);
+            let coll_id = ui.make_persistent_id(format!("tool_call_collapsing_{}", tc.id));
+            let collapsing = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), coll_id, false);
+            collapsing.show_header(ui, |ui| {
+                ui.label(
+                    RichText::new("Parameters & Result")
+                        .size(11.5)
+                        .color(TEXT_SECONDARY)
+                        .strong(),
+                );
+            }).body(|ui| {
+                ui.add_space(3.0_f32);
                     let args_json = serde_json::to_string_pretty(&tc.arguments).unwrap_or_default();
                     if args_json != "{}" {
                         ui.label(RichText::new("Arguments:").size(10.5).color(TEXT_MUTED));
@@ -1430,7 +1464,6 @@ fn render_tool_call_card(ui: &mut Ui, tc: &ToolCallRecord, action: &mut ChatView
                     }
                 });
             });
-        });
 }
 
 fn render_storage_drawer(

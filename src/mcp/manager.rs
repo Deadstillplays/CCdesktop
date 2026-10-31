@@ -18,6 +18,9 @@ struct McpManagerInner {
     http_servers: HashMap<String, String>, // server_name -> base_url
     statuses: HashMap<String, ServerStatus>,
     tools: Vec<McpTool>,
+    resources: Vec<McpResource>,
+    prompts: Vec<McpPrompt>,
+    metadata: Vec<McpServerMetadata>,
     config: McpConfigFile,
     config_path: String,
 }
@@ -91,9 +94,23 @@ impl McpManager {
             match http_client::fetch_tools_from_http(name, &url).await {
                 Ok(tools) => {
                     let tool_count = tools.len();
+                    let meta = http_client::fetch_metadata_from_http(name, &url).await.unwrap_or_else(|_| McpServerMetadata {
+                        server_name: name.to_string(),
+                        ..Default::default()
+                    });
+                    let resources = http_client::fetch_resources_from_http(name, &url).await.unwrap_or_default();
+                    let prompts = http_client::fetch_prompts_from_http(name, &url).await.unwrap_or_default();
+
                     let mut inner = self.inner.write().await;
                     inner.tools.retain(|t| t.server_name != name);
                     inner.tools.extend(tools);
+                    inner.resources.retain(|r| r.server_name != name);
+                    inner.resources.extend(resources);
+                    inner.prompts.retain(|p| p.server_name != name);
+                    inner.prompts.extend(prompts);
+                    inner.metadata.retain(|m| m.server_name != name);
+                    inner.metadata.push(meta);
+
                     inner.http_servers.insert(name.to_string(), url);
                     inner.statuses.insert(
                         name.to_string(),
@@ -111,11 +128,18 @@ impl McpManager {
             }
         } else {
             match McpClientHandle::spawn(name.to_string(), cfg).await {
-                Ok((client, tools)) => {
+                Ok((client, tools, resources, prompts, meta)) => {
                     let tool_count = tools.len();
                     let mut inner = self.inner.write().await;
                     inner.tools.retain(|t| t.server_name != name);
                     inner.tools.extend(tools);
+                    inner.resources.retain(|r| r.server_name != name);
+                    inner.resources.extend(resources);
+                    inner.prompts.retain(|p| p.server_name != name);
+                    inner.prompts.extend(prompts);
+                    inner.metadata.retain(|m| m.server_name != name);
+                    inner.metadata.push(meta);
+
                     inner.servers.insert(name.to_string(), client);
                     inner.statuses.insert(
                         name.to_string(),
@@ -188,6 +212,9 @@ impl McpManager {
         }
         inner.http_servers.remove(name);
         inner.tools.retain(|t| t.server_name != name);
+        inner.resources.retain(|r| r.server_name != name);
+        inner.prompts.retain(|p| p.server_name != name);
+        inner.metadata.retain(|m| m.server_name != name);
         inner
             .statuses
             .insert(name.to_string(), ServerStatus::Disconnected);
@@ -201,6 +228,21 @@ impl McpManager {
     pub async fn get_all_tools(&self) -> Vec<McpTool> {
         let inner = self.inner.read().await;
         inner.tools.clone()
+    }
+
+    pub async fn get_all_server_metadata(&self) -> Vec<McpServerMetadata> {
+        let inner = self.inner.read().await;
+        inner.metadata.clone()
+    }
+
+    pub async fn get_all_resources(&self) -> Vec<McpResource> {
+        let inner = self.inner.read().await;
+        inner.resources.clone()
+    }
+
+    pub async fn get_all_prompts(&self) -> Vec<McpPrompt> {
+        let inner = self.inner.read().await;
+        inner.prompts.clone()
     }
 
     #[allow(dead_code)]
@@ -310,18 +352,66 @@ impl McpManager {
             return http_client::read_resource_on_http(trimmed, uri).await;
         }
 
-        let http_url = {
+        let (server_client, http_url) = {
             let inner = self.inner.read().await;
-            inner.http_servers.get(trimmed).cloned()
+            (
+                inner.servers.get(trimmed).cloned(),
+                inner.http_servers.get(trimmed).cloned(),
+            )
         };
 
-        if let Some(url) = http_url {
+        if let Some(client) = server_client {
+            client.read_resource(uri).await
+        } else if let Some(url) = http_url {
             http_client::read_resource_on_http(&url, uri).await
         } else {
+            // Search all resources to find which server owns this URI
+            let inner = self.inner.read().await;
+            if let Some(res) = inner.resources.iter().find(|r| r.uri == uri) {
+                if let Some(client) = inner.servers.get(&res.server_name) {
+                    return client.read_resource(uri).await;
+                }
+                if let Some(url) = inner.http_servers.get(&res.server_name) {
+                    return http_client::read_resource_on_http(url, uri).await;
+                }
+            }
             Err(format!(
-                "Reading resources on stdio server '{}' is not supported via HTTP. Specify direct URL or resource URI.",
-                server_or_url
+                "Server '{}' is not connected or resource '{}' not found",
+                server_or_url, uri
             ))
+        }
+    }
+
+    #[allow(dead_code)]
+    pub async fn get_prompt_for_server_or_url(
+        &self,
+        server_or_url: &str,
+        name: &str,
+        arguments: Value,
+    ) -> Result<Value, String> {
+        let trimmed = server_or_url.trim();
+        if trimmed.starts_with("http://")
+            || trimmed.starts_with("https://")
+            || trimmed.starts_with("localhost")
+            || trimmed.starts_with("127.0.0.1")
+        {
+            return http_client::get_prompt_on_http(trimmed, name, &arguments).await;
+        }
+
+        let (server_client, http_url) = {
+            let inner = self.inner.read().await;
+            (
+                inner.servers.get(trimmed).cloned(),
+                inner.http_servers.get(trimmed).cloned(),
+            )
+        };
+
+        if let Some(client) = server_client {
+            client.get_prompt(name, arguments).await
+        } else if let Some(url) = http_url {
+            http_client::get_prompt_on_http(&url, name, &arguments).await
+        } else {
+            Err(format!("Server '{}' is not connected", server_or_url))
         }
     }
 

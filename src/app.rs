@@ -607,7 +607,7 @@ impl eframe::App for ClaudeDesktopApp {
                     self.chat_ui_state.pending_attachments.push(att);
                 }
                 ctx.input_mut(|i| {
-                    i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::V, .. }));
+                    i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::V, .. } | egui::Event::Paste(_)));
                 });
                 ctx.request_repaint();
             } else {

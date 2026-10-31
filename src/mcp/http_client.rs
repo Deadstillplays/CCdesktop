@@ -1,4 +1,4 @@
-use super::types::McpTool;
+use super::types::{McpPrompt, McpResource, McpServerMetadata, McpTool};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -162,4 +162,100 @@ pub async fn read_resource_on_http(url: &str, uri: &str) -> Result<Value, String
         "uri": uri
     });
     post_json_rpc(url, "resources/read", params).await
+}
+
+pub async fn fetch_metadata_from_http(
+    server_name: &str,
+    url: &str,
+) -> Result<McpServerMetadata, String> {
+    let mut meta = McpServerMetadata {
+        server_name: server_name.to_string(),
+        version: None,
+        instructions: None,
+        capabilities: json!({}),
+    };
+    if let Ok(res) = post_json_rpc(url, "initialize", json!({
+        "protocolVersion": "2024-11-05",
+        "capabilities": {
+            "roots": { "listChanged": true },
+            "sampling": {}
+        },
+        "clientInfo": {
+            "name": "claude-desktop-rust",
+            "version": "0.1.0"
+        }
+    })).await {
+        if let Some(info) = res.get("serverInfo") {
+            meta.version = info.get("version").and_then(|v| v.as_str()).map(|s| s.to_string());
+        }
+        if let Some(inst) = res.get("instructions").and_then(|i| i.as_str()) {
+            meta.instructions = Some(inst.to_string());
+        }
+        if let Some(caps) = res.get("capabilities").cloned() {
+            meta.capabilities = caps;
+        }
+    }
+    Ok(meta)
+}
+
+pub async fn fetch_resources_from_http(
+    server_name: &str,
+    url: &str,
+) -> Result<Vec<McpResource>, String> {
+    let mut resources = Vec::new();
+    if let Ok(res) = post_json_rpc(url, "resources/list", json!({})).await {
+        if let Some(arr) = res.get("resources").and_then(|r| r.as_array()) {
+            for r in arr {
+                if let (Some(uri), Some(name)) = (r.get("uri").and_then(|u| u.as_str()), r.get("name").and_then(|n| n.as_str())) {
+                    let desc = r.get("description").and_then(|d| d.as_str()).map(|s| s.to_string());
+                    let mime = r.get("mimeType").and_then(|m| m.as_str()).map(|s| s.to_string());
+                    resources.push(McpResource {
+                        server_name: server_name.to_string(),
+                        uri: uri.to_string(),
+                        name: name.to_string(),
+                        description: desc,
+                        mime_type: mime,
+                    });
+                }
+            }
+        }
+    }
+    Ok(resources)
+}
+
+pub async fn fetch_prompts_from_http(
+    server_name: &str,
+    url: &str,
+) -> Result<Vec<McpPrompt>, String> {
+    let mut prompts = Vec::new();
+    if let Ok(res) = post_json_rpc(url, "prompts/list", json!({})).await {
+        if let Some(arr) = res.get("prompts").and_then(|p| p.as_array()) {
+            for p in arr {
+                if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
+                    let desc = p.get("description").and_then(|d| d.as_str()).map(|s| s.to_string());
+                    let args = p.get("arguments").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+                    prompts.push(McpPrompt {
+                        server_name: server_name.to_string(),
+                        name: name.to_string(),
+                        description: desc,
+                        arguments: args,
+                    });
+                }
+            }
+        }
+    }
+    Ok(prompts)
+}
+
+#[allow(dead_code)]
+pub async fn get_prompt_on_http(
+    url: &str,
+    name: &str,
+    arguments: &Value,
+) -> Result<Value, String> {
+    let params = json!({
+        "name": name,
+        "arguments": arguments
+    });
+    post_json_rpc(url, "prompts/get", params).await
 }

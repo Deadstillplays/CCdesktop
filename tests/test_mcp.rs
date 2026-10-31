@@ -13,9 +13,10 @@ async fn test_roblox_mcp_connection() {
     println!("Testing Roblox MCP spawn...");
     let res = McpClientHandle::spawn("Roblox_Studio".to_string(), cfg).await;
     match res {
-        Ok((client, tools)) => {
+        Ok((client, tools, resources, prompts, metadata)) => {
             println!("Successfully connected to Roblox Studio MCP!");
-            println!("Found {} tools:", tools.len());
+            println!("Found {} tools, {} resources, {} prompts", tools.len(), resources.len(), prompts.len());
+            println!("Server instructions: {:?}", metadata.instructions);
             for t in tools.iter().take(5) {
                 println!(" - {}", t.name);
             }

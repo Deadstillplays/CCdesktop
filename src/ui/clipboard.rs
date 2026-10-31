@@ -98,8 +98,8 @@ mod win_clipboard {
         paths
     }
 
-    /// Read native Windows CF_DIB / CF_DIBV5 (bitmaps / screenshots / copied images) directly as BMP bytes
-    pub fn get_clipboard_dib_image() -> Option<Vec<u8>> {
+    /// Read native Windows CF_DIBV5 / CF_DIB (bitmaps / screenshots / copied images) directly into RGBA pixels
+    pub fn get_clipboard_dib_rgba() -> Option<(u32, u32, Vec<u8>)> {
         unsafe {
             let mut opened = false;
             for _ in 0..5 {
@@ -113,12 +113,13 @@ mod win_clipboard {
                 return None;
             }
 
-            const CF_DIB: u32 = 8;
             const CF_DIBV5: u32 = 17;
-            let format_to_use = if IsClipboardFormatAvailable(CF_DIB) != 0 {
-                Some(CF_DIB)
-            } else if IsClipboardFormatAvailable(CF_DIBV5) != 0 {
+            const CF_DIB: u32 = 8;
+            // Prefer CF_DIBV5 first as it contains modern alpha and color space definitions
+            let format_to_use = if IsClipboardFormatAvailable(CF_DIBV5) != 0 {
                 Some(CF_DIBV5)
+            } else if IsClipboardFormatAvailable(CF_DIB) != 0 {
+                Some(CF_DIB)
             } else {
                 None
             };
@@ -127,44 +128,94 @@ mod win_clipboard {
                 let hdata = GetClipboardData(fmt);
                 if !hdata.is_null() {
                     let size = GlobalSize(hdata);
-                    if size > 40 {
+                    if size >= 40 {
                         let ptr = GlobalLock(hdata) as *const u8;
                         if !ptr.is_null() {
                             let dib_slice = std::slice::from_raw_parts(ptr, size);
 
-                            let bi_size = u32::from_le_bytes(dib_slice[0..4].try_into().unwrap_or([40, 0, 0, 0]));
-                            let bi_bit_count = u16::from_le_bytes(dib_slice[14..16].try_into().unwrap_or([24, 0]));
-                            let bi_compression = u32::from_le_bytes(dib_slice[16..20].try_into().unwrap_or([0, 0, 0, 0]));
-                            let bi_clr_used = u32::from_le_bytes(dib_slice[32..36].try_into().unwrap_or([0, 0, 0, 0]));
+                            let bi_size = u32::from_le_bytes(dib_slice[0..4].try_into().unwrap_or([40, 0, 0, 0])) as usize;
+                            if size >= bi_size && bi_size >= 40 {
+                                let bi_width = i32::from_le_bytes(dib_slice[4..8].try_into().unwrap_or([0, 0, 0, 0]));
+                                let bi_height = i32::from_le_bytes(dib_slice[8..12].try_into().unwrap_or([0, 0, 0, 0]));
+                                let bi_bit_count = u16::from_le_bytes(dib_slice[14..16].try_into().unwrap_or([24, 0])) as usize;
+                                let bi_compression = u32::from_le_bytes(dib_slice[16..20].try_into().unwrap_or([0, 0, 0, 0]));
+                                let bi_clr_used = u32::from_le_bytes(dib_slice[32..36].try_into().unwrap_or([0, 0, 0, 0])) as usize;
 
-                            let palette_size = if bi_clr_used > 0 {
-                                bi_clr_used * 4
-                            } else if bi_bit_count <= 8 {
-                                let count = if bi_clr_used > 0 { bi_clr_used } else { 1u32 << bi_bit_count };
-                                count * 4
-                            } else if (bi_compression == 3 || bi_compression == 6) && bi_size == 40 {
-                                12
-                            } else {
-                                0
-                            };
+                                let width = bi_width.abs() as usize;
+                                let height = bi_height.abs() as usize;
+                                let is_bottom_up = bi_height > 0;
 
-                            let off_bits = 14 + bi_size + palette_size;
-                            let total_size = 14 + size as u32;
+                                let palette_size = if bi_clr_used > 0 {
+                                    bi_clr_used * 4
+                                } else if bi_bit_count <= 8 {
+                                    (1 << bi_bit_count) * 4
+                                } else if (bi_compression == 3 || bi_compression == 6) && bi_size == 40 {
+                                    12
+                                } else {
+                                    0
+                                };
 
-                            let mut bmp = Vec::with_capacity(total_size as usize);
-                            bmp.push(b'B');
-                            bmp.push(b'M');
-                            bmp.extend_from_slice(&total_size.to_le_bytes());
-                            bmp.extend_from_slice(&[0u8; 4]);
-                            bmp.extend_from_slice(&off_bits.to_le_bytes());
-                            bmp.extend_from_slice(dib_slice);
+                                let pixel_offset = bi_size + palette_size;
+                                if width > 0 && height > 0 && size >= pixel_offset {
+                                    let pixel_data = &dib_slice[pixel_offset..];
+                                    let mut rgba = vec![0u8; width * height * 4];
 
+                                    if bi_bit_count == 32 {
+                                        let row_bytes = width * 4;
+                                        for row in 0..height {
+                                            let src_row = if is_bottom_up { height - 1 - row } else { row };
+                                            let src_start = src_row * row_bytes;
+                                            let dst_start = row * width * 4;
+                                            if src_start + row_bytes <= pixel_data.len() {
+                                                for x in 0..width {
+                                                    let b = pixel_data[src_start + x * 4];
+                                                    let g = pixel_data[src_start + x * 4 + 1];
+                                                    let r = pixel_data[src_start + x * 4 + 2];
+                                                    let a = pixel_data[src_start + x * 4 + 3];
+                                                    rgba[dst_start + x * 4] = r;
+                                                    rgba[dst_start + x * 4 + 1] = g;
+                                                    rgba[dst_start + x * 4 + 2] = b;
+                                                    rgba[dst_start + x * 4 + 3] = a;
+                                                }
+                                            }
+                                        }
+                                        // Fix alpha if all zeros (common Windows GDI 32-bit screenshot issue)
+                                        let all_zero_alpha = rgba.chunks_exact(4).all(|p| p[3] == 0);
+                                        if all_zero_alpha {
+                                            for p in rgba.chunks_exact_mut(4) {
+                                                p[3] = 255;
+                                            }
+                                        }
+                                        GlobalUnlock(hdata);
+                                        CloseClipboard();
+                                        return Some((width as u32, height as u32, rgba));
+                                    } else if bi_bit_count == 24 {
+                                        let stride = ((width * 3 + 3) / 4) * 4;
+                                        for row in 0..height {
+                                            let src_row = if is_bottom_up { height - 1 - row } else { row };
+                                            let src_start = src_row * stride;
+                                            let dst_start = row * width * 4;
+                                            if src_start + width * 3 <= pixel_data.len() {
+                                                for x in 0..width {
+                                                    let b = pixel_data[src_start + x * 3];
+                                                    let g = pixel_data[src_start + x * 3 + 1];
+                                                    let r = pixel_data[src_start + x * 3 + 2];
+                                                    rgba[dst_start + x * 4] = r;
+                                                    rgba[dst_start + x * 4 + 1] = g;
+                                                    rgba[dst_start + x * 4 + 2] = b;
+                                                    rgba[dst_start + x * 4 + 3] = 255;
+                                                }
+                                            }
+                                        }
+                                        GlobalUnlock(hdata);
+                                        CloseClipboard();
+                                        return Some((width as u32, height as u32, rgba));
+                                    }
+                                }
+                            }
                             GlobalUnlock(hdata);
-                            CloseClipboard();
-                            return Some(bmp);
                         }
                     }
-                    GlobalUnlock(hdata);
                 }
             }
             CloseClipboard();
@@ -296,39 +347,33 @@ impl ClipboardHelper {
         Self::try_paste_attachments().into_iter().next()
     }
 
-    /// Comprehensive clipboard paste: handles raw PNG, CF_HDROP (Explorer files), CF_DIB (screenshots), and paths
+    /// Comprehensive clipboard paste: handles arboard images, raw PNG, CF_DIBV5/CF_DIB screenshots, CF_HDROP (Explorer files), and file paths
     pub fn try_paste_attachments() -> Vec<ChatAttachment> {
         use base64::Engine;
         let mut results = Vec::new();
 
-        // 1. Check Windows CF_HDROP (files copied in Windows Explorer)
-        #[cfg(windows)]
-        {
-            let files = win_clipboard::get_clipboard_files();
-            for f in files {
-                if let Some(att) = crate::project::inspect_any_path_standalone(&f.to_string_lossy()) {
-                    results.push(att);
-                }
-            }
-            if !results.is_empty() {
-                return results;
-            }
-        }
+        // 1. Primary: Arboard cross-platform image retrieval with alpha sanitization
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if let Ok(img_data) = cb.get_image() {
+                let width = img_data.width as u32;
+                let height = img_data.height as u32;
+                if width > 0 && height > 0 {
+                    let mut rgba = img_data.bytes.into_owned();
+                    // Fix alpha if all zeros (common Windows GDI 32-bit screen capture issue where alpha is left 0)
+                    let all_zero_alpha = rgba.chunks_exact(4).all(|p| p[3] == 0);
+                    if all_zero_alpha {
+                        for p in rgba.chunks_exact_mut(4) {
+                            p[3] = 255;
+                        }
+                    }
 
-        // 2. Check native Windows CF_DIB / Bitmap (screenshots, Snipping Tool, Chrome/Edge copied images)
-        #[cfg(windows)]
-        {
-            if let Some(bmp_bytes) = win_clipboard::get_clipboard_dib_image() {
-                if let Ok(dyn_img) = image::load_from_memory(&bmp_bytes) {
-                    let (w, h) = (dyn_img.width(), dyn_img.height());
                     let mut png_bytes = Vec::new();
                     let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
-                    let rgba = dyn_img.to_rgba8();
                     if image::ImageEncoder::write_image(
                         encoder,
-                        rgba.as_raw(),
-                        w,
-                        h,
+                        &rgba,
+                        width,
+                        height,
                         image::ExtendedColorType::Rgba8,
                     )
                     .is_ok()
@@ -336,12 +381,12 @@ impl ClipboardHelper {
                         let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
                         results.push(ChatAttachment {
                             id: Uuid::new_v4().to_string(),
-                            name: format!("Pasted Image ({}x{})", w, h),
+                            name: format!("Pasted Image ({}x{})", width, height),
                             kind: AttachmentKind::Image {
                                 mime_type: "image/png".to_string(),
                                 base64_data: b64,
-                                width: w,
-                                height: h,
+                                width,
+                                height,
                             },
                         });
                         return results;
@@ -350,7 +395,7 @@ impl ClipboardHelper {
             }
         }
 
-        // 3. Check Raw "PNG" clipboard format (Chrome, Discord, Snipping Tool)
+        // 2. Direct Raw "PNG" clipboard format (Chrome, Discord, Telegram, Photoshop)
         #[cfg(windows)]
         {
             if let Some(png_bytes) = win_clipboard::get_raw_png() {
@@ -372,7 +417,53 @@ impl ClipboardHelper {
             }
         }
 
-        // 4. Check if clipboard text contains an existing file/directory path
+        // 3. Native Windows CF_DIBV5 / CF_DIB (Bitmaps, Snipping Tool, PrintScreen)
+        #[cfg(windows)]
+        {
+            if let Some(rgba_info) = win_clipboard::get_clipboard_dib_rgba() {
+                let (w, h, rgba) = rgba_info;
+                let mut png_bytes = Vec::new();
+                let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
+                if image::ImageEncoder::write_image(
+                    encoder,
+                    &rgba,
+                    w,
+                    h,
+                    image::ExtendedColorType::Rgba8,
+                )
+                .is_ok()
+                {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+                    results.push(ChatAttachment {
+                        id: Uuid::new_v4().to_string(),
+                        name: format!("Pasted Screenshot ({}x{})", w, h),
+                        kind: AttachmentKind::Image {
+                            mime_type: "image/png".to_string(),
+                            base64_data: b64,
+                            width: w,
+                            height: h,
+                        },
+                    });
+                    return results;
+                }
+            }
+        }
+
+        // 4. Check Windows CF_HDROP (files copied in Windows Explorer)
+        #[cfg(windows)]
+        {
+            let files = win_clipboard::get_clipboard_files();
+            for f in files {
+                if let Some(att) = crate::project::inspect_any_path_standalone(&f.to_string_lossy()) {
+                    results.push(att);
+                }
+            }
+            if !results.is_empty() {
+                return results;
+            }
+        }
+
+        // 5. Check if clipboard text contains an existing file/directory path
         if let Some(text) = Self::get_text() {
             let trimmed = text.trim().trim_matches('"').trim();
             let expanded = crate::mcp::client::expand_vars(trimmed);
@@ -381,42 +472,6 @@ impl ClipboardHelper {
                 if let Some(att) = crate::project::inspect_any_path_standalone(&expanded) {
                     results.push(att);
                     return results;
-                }
-            }
-        }
-
-        // 5. Fallback to arboard (non-Windows or secondary)
-        if let Ok(mut cb) = arboard::Clipboard::new() {
-            if let Ok(img_data) = cb.get_image() {
-                let width = img_data.width as u32;
-                let height = img_data.height as u32;
-                let rgba_raw = img_data.bytes.into_owned();
-
-                if let Some(rgba_img) = image::RgbaImage::from_raw(width, height, rgba_raw) {
-                    let mut png_bytes = Vec::new();
-                    let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
-                    if image::ImageEncoder::write_image(
-                        encoder,
-                        rgba_img.as_raw(),
-                        width,
-                        height,
-                        image::ExtendedColorType::Rgba8,
-                    )
-                    .is_ok()
-                    {
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-                        results.push(ChatAttachment {
-                            id: Uuid::new_v4().to_string(),
-                            name: format!("Pasted Image ({}x{})", width, height),
-                            kind: AttachmentKind::Image {
-                                mime_type: "image/png".to_string(),
-                                base64_data: b64,
-                                width,
-                                height,
-                            },
-                        });
-                        return results;
-                    }
                 }
             }
         }

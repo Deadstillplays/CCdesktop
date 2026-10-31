@@ -861,6 +861,73 @@ impl ProjectManager {
         Ok(res)
     }
 
+    pub fn run_ssh_command(
+        &self,
+        host: &str,
+        command: &str,
+        user: Option<&str>,
+        port: Option<u16>,
+        key_path: Option<&str>,
+        working_dir: Option<&str>,
+    ) -> Result<String, String> {
+        let ssh_bin = if Path::new(r"C:\Windows\System32\OpenSSH\ssh.exe").exists() {
+            r"C:\Windows\System32\OpenSSH\ssh.exe"
+        } else {
+            "ssh"
+        };
+
+        let mut cmd = Command::new(ssh_bin);
+        // Non-interactive safe flags to prevent hanging on prompts
+        cmd.args([
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=15",
+        ]);
+
+        if let Some(p) = port {
+            cmd.args(["-p", &p.to_string()]);
+        }
+        if let Some(k) = key_path {
+            cmd.args(["-i", k]);
+        }
+
+        let destination = if let Some(u) = user {
+            format!("{}@{}", u, host)
+        } else {
+            host.to_string()
+        };
+        cmd.arg(&destination);
+
+        let final_cmd = if let Some(wd) = working_dir {
+            format!("cd '{}' && {}", wd, command)
+        } else {
+            command.to_string()
+        };
+        cmd.arg(&final_cmd);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+
+        let output = cmd.output().map_err(|e| format!("Failed to execute SSH command: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        let mut res = stdout;
+        if !stderr.is_empty() {
+            if !res.is_empty() {
+                res.push_str("\n[STDERR]\n");
+            }
+            res.push_str(&stderr);
+        }
+        if res.trim().is_empty() {
+            res = "SSH command executed successfully (no output).".to_string();
+        }
+        Ok(res)
+    }
+
     pub fn read_file(&self, folder_path: &str, relative_path: &str) -> Result<String, String> {
         let root = Path::new(folder_path);
         let target = root.join(relative_path);

@@ -283,6 +283,10 @@ pub async fn run_claude_web_turn(
         mcp_tools = mcp_manager.get_all_tools().await;
     }
 
+    let mcp_metadata = mcp_manager.get_all_server_metadata().await;
+    let mcp_resources = mcp_manager.get_all_resources().await;
+    let _mcp_prompts = mcp_manager.get_all_prompts().await;
+
     // Build native tools array for Claude.ai /completion2
     let mut tools_json_array: Vec<Value> = Vec::new();
 
@@ -392,6 +396,32 @@ pub async fn run_claude_web_turn(
                 "uri": { "type": "string", "description": "Resource URI to read" }
             },
             "required": ["server_or_url", "uri"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "list_mcp_resources",
+        "description": "List all resources exposed by connected MCP servers (such as schemas, game tree dumps, documentation, logs, or project templates).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "server_or_url": { "type": "string", "description": "Optional server name or URL to query" }
+            }
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "ssh_command",
+        "description": "Execute remote commands via SSH / remote terminal. Connects non-interactively and returns full unclipped stdout/stderr.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "host": { "type": "string", "description": "Target hostname, IP, or user@host" },
+                "command": { "type": "string", "description": "Command or script to execute on the remote machine" },
+                "user": { "type": "string", "description": "Optional SSH user" },
+                "port": { "type": "integer", "description": "Optional SSH port (default 22)" },
+                "key_path": { "type": "string", "description": "Optional identity file path (.pem, id_rsa, etc.)" },
+                "working_dir": { "type": "string", "description": "Optional remote working directory" }
+            },
+            "required": ["host", "command"]
         }
     }));
     tools_json_array.push(json!({
@@ -737,6 +767,24 @@ pub async fn run_claude_web_turn(
     }
     if !system_prompt.is_empty() {
         initial_prompt.push_str(&format!("System Instructions:\n{}\n\n", system_prompt));
+    }
+
+    if !mcp_metadata.is_empty() || !mcp_resources.is_empty() {
+        initial_prompt.push_str("<mcp_context>\n");
+        for meta in &mcp_metadata {
+            initial_prompt.push_str(&format!("### MCP Server: {} (v{})\n", meta.server_name, meta.version.as_deref().unwrap_or("1.0.0")));
+            if let Some(inst) = &meta.instructions {
+                initial_prompt.push_str(&format!("Server Instructions & Guidelines:\n{}\n\n", inst));
+            }
+        }
+        if !mcp_resources.is_empty() {
+            initial_prompt.push_str("### Available MCP Resources:\n");
+            for r in &mcp_resources {
+                initial_prompt.push_str(&format!("- `{}` ({}): {}\n", r.uri, r.name, r.description.as_deref().unwrap_or("Resource")));
+            }
+            initial_prompt.push_str("💡 Use `read_mcp_resource(server_or_url, uri)` to read full contents of any resource.\n\n");
+        }
+        initial_prompt.push_str("</mcp_context>\n\n");
     }
 
     let history_len = history.len();
@@ -1375,8 +1423,8 @@ async fn execute_tool(
             let tool_args = args.get("arguments").or_else(|| args.get("args")).cloned().unwrap_or(json!({}));
             match mcp_manager.call_tool_or_url(server_or_url, tool, tool_args).await {
                 Ok(val) => {
-                    let formatted = serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string());
-                    (formatted, false)
+                    let (formatted, is_err) = crate::mcp::types::format_mcp_call_result(&val);
+                    (formatted, is_err)
                 }
                 Err(err) => (err, true),
             }
@@ -1404,6 +1452,25 @@ async fn execute_tool(
                 Err(err) => (err, true),
             }
         }
+        "list_mcp_resources" => {
+            let resources = mcp_manager.get_all_resources().await;
+            if resources.is_empty() {
+                ("No MCP resources discovered across connected servers.".to_string(), false)
+            } else {
+                let mut out = format!("Found {} MCP resource(s):\n\n", resources.len());
+                for r in resources {
+                    out.push_str(&format!(
+                        "- `{}` (Server: {})\n  Name: {}\n  Description: {}\n  MIME Type: {}\n\n",
+                        r.uri,
+                        r.server_name,
+                        r.name,
+                        r.description.as_deref().unwrap_or("No description"),
+                        r.mime_type.as_deref().unwrap_or("application/octet-stream")
+                    ));
+                }
+                (out, false)
+            }
+        }
         "connect_mcp_server" => {
             let n = args.get("name").and_then(|v| v.as_str()).unwrap_or("server");
             let target = args.get("target").or_else(|| args.get("endpoint")).or_else(|| args.get("url")).and_then(|t| t.as_str()).unwrap_or("");
@@ -1417,8 +1484,8 @@ async fn execute_tool(
             let uri = args.get("uri").and_then(|u| u.as_str()).unwrap_or("");
             match mcp_manager.read_resource_for_server_or_url(server_or_url, uri).await {
                 Ok(val) => {
-                    let formatted = serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string());
-                    (formatted, false)
+                    let (formatted, is_err) = crate::mcp::types::format_mcp_call_result(&val);
+                    (formatted, is_err)
                 }
                 Err(err) => (err, true),
             }
@@ -1691,6 +1758,23 @@ async fn execute_tool(
                 Err(err) => (err, true),
             }
         }
+        "ssh_command" => {
+            let host = args.get("host").or_else(|| args.get("hostname")).and_then(|h| h.as_str()).unwrap_or("");
+            let cmd = args.get("command").or_else(|| args.get("cmd")).and_then(|c| c.as_str()).unwrap_or("");
+            let user = args.get("user").or_else(|| args.get("username")).and_then(|u| u.as_str());
+            let port = args.get("port").and_then(|p| p.as_u64()).map(|p| p as u16);
+            let key_path = args.get("identity_file").or_else(|| args.get("key_path")).and_then(|k| k.as_str());
+            let wd = args.get("working_directory").or_else(|| args.get("dir")).and_then(|d| d.as_str());
+
+            if host.is_empty() || cmd.is_empty() {
+                ("Error: both 'host' and 'command' parameters are required for ssh_command.".to_string(), true)
+            } else {
+                match project_manager.run_ssh_command(host, cmd, user, port, key_path, wd) {
+                    Ok(out) => (out, false),
+                    Err(err) => (err, true),
+                }
+            }
+        }
         "inspect_path" => {
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
             match project_manager.inspect_path_any(active_folder, path) {
@@ -1800,8 +1884,8 @@ async fn execute_tool(
             // MCP tool (e.g. Roblox Studio tools: list_roblox_studios, search_game_tree, execute_luau, etc.)
             match mcp_manager.call_tool(name, args.clone()).await {
                 Ok(val) => {
-                    let formatted = serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string());
-                    (formatted, false)
+                    let (formatted, is_err) = crate::mcp::types::format_mcp_call_result(&val);
+                    (formatted, is_err)
                 }
                 Err(e) => (format!("MCP tool error: {}", e), true),
             }
