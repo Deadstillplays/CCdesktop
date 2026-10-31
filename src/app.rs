@@ -58,6 +58,10 @@ pub struct ClaudeDesktopApp {
     pub generating_chat_id: Option<String>,
     pub cancel_token: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub last_paste_time: Option<std::time::Instant>,
+    pub show_command_palette: bool,
+    pub command_palette_query: String,
+    pub rename_chat_id: Option<String>,
+    pub rename_chat_input: String,
 }
 
 impl ClaudeDesktopApp {
@@ -143,6 +147,10 @@ impl ClaudeDesktopApp {
             generating_chat_id: None,
             cancel_token: None,
             last_paste_time: None,
+            show_command_palette: false,
+            command_palette_query: String::new(),
+            rename_chat_id: None,
+            rename_chat_input: String::new(),
         };
 
         app.reload_mcp_config(true);
@@ -379,6 +387,13 @@ impl ClaudeDesktopApp {
                             self.cancel_token = None;
                             chat.updated_at = Utc::now();
                             let _ = self.storage.save_chat(chat);
+                            // Play completion beep
+                            #[cfg(windows)]
+                            unsafe {
+                                #[link(name = "user32")]
+                                extern "system" { fn MessageBeep(uType: u32) -> i32; }
+                                MessageBeep(0xFFFFFFFF_u32);
+                            }
                         }
                         TurnEvent::Error(err) => {
                             if assistant_msg.content.is_empty() {
@@ -569,6 +584,19 @@ impl eframe::App for ClaudeDesktopApp {
 
         let is_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
 
+        // Ctrl+K: command palette
+        let ctrl_k = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::K));
+        if ctrl_k {
+            self.show_command_palette = !self.show_command_palette;
+            self.command_palette_query.clear();
+        }
+
+        // Escape closes command palette
+        if self.show_command_palette && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.show_command_palette = false;
+            self.command_palette_query.clear();
+        }
+
         // Global Clipboard Pasting (Ctrl+V, Win+V Clipboard History, Subclass intercept)
         let egui_ctrl_v = ctx.input(|i| {
             (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V)
@@ -657,6 +685,108 @@ impl eframe::App for ClaudeDesktopApp {
             ctx.request_repaint();
         }
 
+        // Command Palette (Ctrl+K)
+        if self.show_command_palette {
+            egui::Window::new("cmd_palette_window")
+                .title_bar(false)
+                .resizable(false)
+                .collapsible(false)
+                .fixed_size(egui::vec2(440.0, 320.0))
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+                .frame(
+                    Frame::new()
+                        .fill(egui::Color32::from_rgb(24, 23, 21))
+                        .stroke(Stroke::new(1.5_f32, egui::Color32::from_rgb(200, 160, 100)))
+                        .corner_radius(egui::CornerRadius::same(10))
+                        .inner_margin(Margin::same(14)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Command Palette").size(14.0).color(egui::Color32::WHITE).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new("Ctrl+K or Esc to close").size(10.0).color(egui::Color32::from_rgb(120, 115, 110)));
+                        });
+                    });
+                    ui.add_space(8.0);
+                    let _sr = ui.add(
+                        egui::TextEdit::singleline(&mut self.command_palette_query)
+                            .hint_text("Type a command or view name...")
+                            .desired_width(ui.available_width())
+                            .frame(true),
+                    );
+                    _sr.request_focus();
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+
+                    let q = self.command_palette_query.to_lowercase();
+                    let commands: &[(&str, &str, &str)] = &[
+                        ("chat", "💬 Switch to Chat", "chat"),
+                        ("files", "📁 Switch to Files / Project", "files project"),
+                        ("memory", "🧠 Switch to Memory / Storage", "memory storage brain"),
+                        ("mcp", "🔌 Switch to MCP Tools", "mcp tools"),
+                        ("terminal", ">_ Switch to Terminal", "terminal shell cmd"),
+                        ("settings", "⚙ Switch to Settings", "settings config"),
+                        ("new", "+ New Chat", "new chat create"),
+                        ("search", "🔍 Find in Chat (Ctrl+F)", "search find messages"),
+                        ("clear", "🗑 Clear Current Chat", "clear delete reset"),
+                    ];
+
+                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 2.0);
+                        for (action_key, label, keywords) in commands {
+                            if q.is_empty() || label.to_lowercase().contains(&q) || keywords.contains(q.as_str()) {
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(*label).size(13.0).color(egui::Color32::WHITE)
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .min_size(egui::vec2(ui.available_width(), 28.0));
+
+                                if ui.add(btn).clicked() {
+                                    self.show_command_palette = false;
+                                    match *action_key {
+                                        "chat" => self.active_view = ActiveView::Chat,
+                                        "files" => self.active_view = ActiveView::Project,
+                                        "memory" => self.active_view = ActiveView::Storage,
+                                        "mcp" => self.active_view = ActiveView::Mcp,
+                                        "terminal" => self.active_view = ActiveView::Terminal,
+                                        "settings" => self.active_view = ActiveView::Settings,
+                                        "new" => {
+                                            let ns = ChatSession {
+                                                id: Uuid::new_v4().to_string(),
+                                                title: "New Conversation".to_string(),
+                                                model: self.config.model.clone(),
+                                                messages: Vec::new(),
+                                                claude_web_uuid: None,
+                                                created_at: Utc::now(),
+                                                updated_at: Utc::now(),
+                                            };
+                                            let _ = self.storage.save_chat(&ns);
+                                            self.chats.insert(0, ns.clone());
+                                            self.current_chat_id = Some(ns.id);
+                                            self.active_view = ActiveView::Chat;
+                                        }
+                                        "search" => {
+                                            self.active_view = ActiveView::Chat;
+                                            self.chat_ui_state.show_search_bar = true;
+                                        }
+                                        "clear" => {
+                                            if let Some(ref cid) = self.current_chat_id.clone() {
+                                                if let Some(ch) = self.chats.iter_mut().find(|c| &c.id == cid) {
+                                                    ch.messages.clear();
+                                                    let _ = self.storage.save_chat(ch);
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    });
+                });
+        }
+
         // Left Panel: Sidebar
         egui::SidePanel::left("sidebar_panel")
             .resizable(false)
@@ -694,6 +824,13 @@ impl eframe::App for ClaudeDesktopApp {
                     self.chats.retain(|c| c.id != del_id);
                     if self.current_chat_id.as_deref() == Some(&del_id) {
                         self.current_chat_id = self.chats.first().map(|c| c.id.clone());
+                    }
+                }
+
+                if let Some(rename_id) = sidebar_resp.rename_chat_id {
+                    if let Some(ch) = self.chats.iter().find(|c| c.id == rename_id) {
+                        self.rename_chat_id = Some(rename_id);
+                        self.rename_chat_input = ch.title.clone();
                     }
                 }
 
@@ -886,6 +1023,29 @@ impl eframe::App for ClaudeDesktopApp {
                         if chat_action.clear_chat {
                             chat.messages.clear();
                             let _ = self.storage.save_chat(chat);
+                        }
+
+                        if chat_action.export_chat_md {
+                            let mut md = format!("# {}\n\n", chat.title);
+                            for msg in &chat.messages {
+                                let role = if msg.role == "user" { "## You" } else { "## Claude" };
+                                md.push_str(&format!("{} _{}_\n\n{}\n\n---\n\n", role, msg.timestamp.format("%Y-%m-%d %H:%M"), msg.content));
+                            }
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_file_name(format!("{}.md", chat.title.replace(' ', "_")))
+                                .add_filter("Markdown", &["md"])
+                                .save_file()
+                            {
+                                let _ = std::fs::write(&path, md);
+                                let _ = open::that(&path);
+                            }
+                        }
+
+                        if let Some(new_title) = chat_action.rename_chat {
+                            if !new_title.trim().is_empty() {
+                                chat.title = new_title.trim().to_string();
+                                let _ = self.storage.save_chat(chat);
+                            }
                         }
 
                         if let Some((filename, content)) = chat_action.save_as_artifact {

@@ -21,6 +21,7 @@ pub struct SidebarResponse {
     pub select_chat_id: Option<String>,
     pub delete_chat_id: Option<String>,
     pub create_new_chat: bool,
+    pub rename_chat_id: Option<String>,
 }
 
 pub fn render_sidebar(
@@ -39,6 +40,7 @@ pub fn render_sidebar(
         select_chat_id: None,
         delete_chat_id: None,
         create_new_chat: false,
+        rename_chat_id: None,
     };
 
     ui.spacing_mut().item_spacing = vec2(0.0_f32, 6.0_f32);
@@ -210,6 +212,9 @@ pub fn render_sidebar(
                                 if chat_label.clicked() {
                                     resp.select_chat_id = Some(chat.id.clone());
                                     resp.switch_view = Some(ActiveView::Chat);
+                                }
+                                if chat_label.double_clicked() {
+                                    resp.rename_chat_id = Some(chat.id.clone());
                                 }
 
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

@@ -6,6 +6,7 @@ use egui::{
     StrokeKind, TextEdit, Ui,
 };
 
+#[allow(dead_code)]
 pub struct ChatUiState {
     pub input_text: String,
     pub is_generating: bool,
@@ -16,6 +17,10 @@ pub struct ChatUiState {
     pub http_spy_status: Option<String>,
     pub current_running_tool: Option<String>,
     pub file_dialog_closed_at: Option<std::time::Instant>,
+    pub search_query: String,
+    pub show_search_bar: bool,
+    pub auto_scroll: bool,
+    pub show_command_palette: bool,
 }
 
 impl Default for ChatUiState {
@@ -30,6 +35,10 @@ impl Default for ChatUiState {
             http_spy_status: None,
             current_running_tool: None,
             file_dialog_closed_at: None,
+            search_query: String::new(),
+            show_search_bar: false,
+            auto_scroll: true,
+            show_command_palette: false,
         }
     }
 }
@@ -49,6 +58,8 @@ pub struct ChatViewAction {
     pub start_auto_google_login: bool,
     pub reload_accounts: bool,
     pub open_accounts_file: bool,
+    pub export_chat_md: bool,
+    pub rename_chat: Option<String>,
 }
 
 pub const AVAILABLE_MODELS: &[(&str, &str)] = &[
@@ -85,6 +96,8 @@ pub fn render_chat_view(
         start_auto_google_login: false,
         reload_accounts: false,
         open_accounts_file: false,
+        export_chat_md: false,
+        rename_chat: None,
     };
 
     // Chat Top Header Bar
@@ -116,6 +129,43 @@ pub fn render_chat_view(
                     if ui.small_button(RichText::new("🗑 Clear").size(11.5)).clicked() {
                         action.clear_chat = true;
                     }
+
+                    if ui.button(RichText::new("📤 Export MD").size(11.5).color(TEXT_SECONDARY)).clicked() {
+                        action.export_chat_md = true;
+                    }
+
+                    // Search toggle (Ctrl+F)
+                    let search_color = if ui_state.show_search_bar { ACCENT_PEACH } else { TEXT_SECONDARY };
+                    if ui.button(RichText::new("🔍 Search").size(11.5).color(search_color)).clicked() {
+                        ui_state.show_search_bar = !ui_state.show_search_bar;
+                        if !ui_state.show_search_bar { ui_state.search_query.clear(); }
+                    }
+                    if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F)) {
+                        ui_state.show_search_bar = !ui_state.show_search_bar;
+                        if !ui_state.show_search_bar { ui_state.search_query.clear(); }
+                    }
+
+                    // Token estimate pill
+                    let total_chars: usize = chat.messages.iter().map(|m| m.content.len()).sum();
+                    let est_tokens = (total_chars / 4).max(0);
+                    let (tok_color, tok_label) = if est_tokens > 150_000 {
+                        (Color32::from_rgb(248, 113, 113), format!("~{}k tok ⚠", est_tokens / 1000))
+                    } else if est_tokens > 50_000 {
+                        (Color32::from_rgb(251, 191, 36), format!("~{}k tok", est_tokens / 1000))
+                    } else if est_tokens >= 1000 {
+                        (GREEN_STATUS, format!("~{:.1}k tok", est_tokens as f32 / 1000.0))
+                    } else if est_tokens > 0 {
+                        (GREEN_STATUS, format!("~{} tok", est_tokens))
+                    } else {
+                        (TEXT_MUTED, "empty".to_string())
+                    };
+                    Frame::new()
+                        .fill(CARD_BG)
+                        .corner_radius(CornerRadius::same(4))
+                        .inner_margin(egui::Margin::symmetric(6, 2))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(tok_label).size(10.5).color(tok_color).strong());
+                        });
 
                     if ui.button(RichText::new(">_ Terminal").size(11.5).color(TEXT_SECONDARY)).clicked() {
                         action.open_terminal = true;
@@ -314,6 +364,36 @@ pub fn render_chat_view(
             });
         });
 
+    // Search bar (shown when toggled)
+    if ui_state.show_search_bar {
+        ui.add_space(4.0);
+        Frame::new()
+            .fill(CARD_BG)
+            .corner_radius(CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .stroke(Stroke::new(1.0_f32, ACCENT_PEACH))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🔍").size(12.0).color(ACCENT_PEACH));
+                    ui.add(
+                        TextEdit::singleline(&mut ui_state.search_query)
+                            .frame(false)
+                            .hint_text("Search messages...")
+                            .desired_width(ui.available_width() - 60.0),
+                    );
+                    if !ui_state.search_query.is_empty() {
+                        let query_lower = ui_state.search_query.to_lowercase();
+                        let match_count = chat.messages.iter().filter(|m| m.content.to_lowercase().contains(&query_lower)).count();
+                        ui.label(RichText::new(format!("{} match{}", match_count, if match_count == 1 { "" } else { "es" })).size(11.0).color(TEXT_MUTED));
+                    }
+                    if ui.small_button("✕").clicked() {
+                        ui_state.show_search_bar = false;
+                        ui_state.search_query.clear();
+                    }
+                });
+            });
+    }
+
     ui.add_space(6.0);
 
     // Main layout: Horizontal split if drawer is open
@@ -453,10 +533,37 @@ fn render_messages_and_input(
     let scroll_h = (available_h - bottom_reserved).max(60.0_f32);
 
     // 1. MESSAGES SCROLLFRAME: takes exact available space above the input card
+    // Auto-scroll lock toggle (📌 pin button in bottom-right using painter overlay)
+    let scroll_area_rect = ui.available_rect_before_wrap();
+    let pin_center = egui::Pos2::new(
+        scroll_area_rect.max.x - 20.0,
+        scroll_area_rect.min.y + 20.0,
+    );
+    let pin_rect = egui::Rect::from_center_size(pin_center, egui::vec2(28.0, 28.0));
+    let pin_resp = ui.interact(pin_rect, egui::Id::new("auto_scroll_pin_btn"), egui::Sense::click());
+    if pin_resp.clicked() {
+        ui_state.auto_scroll = !ui_state.auto_scroll;
+    }
+    let pin_bg = if ui_state.auto_scroll { ACCENT_PEACH } else { CARD_BG };
+    let pin_icon = if ui_state.auto_scroll { "📌" } else { "🔓" };
+    ui.painter().rect_filled(pin_rect, egui::CornerRadius::same(6), pin_bg);
+    ui.painter().text(
+        pin_center,
+        egui::Align2::CENTER_CENTER,
+        pin_icon,
+        egui::FontId::proportional(12.0),
+        Color32::WHITE,
+    );
+    if pin_resp.hovered() {
+        egui::show_tooltip_at(ui.ctx(), ui.layer_id(), egui::Id::new("pin_tooltip"), pin_center + egui::vec2(30.0, 0.0), |ui| {
+            ui.label(if ui_state.auto_scroll { "Auto-scroll ON — click to unlock" } else { "Auto-scroll OFF — click to re-pin" });
+        });
+    }
+
     ScrollArea::vertical()
         .max_height(scroll_h)
         .auto_shrink([false, false])
-        .stick_to_bottom(true)
+        .stick_to_bottom(ui_state.auto_scroll)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0_f32, 12.0_f32);
 
@@ -489,8 +596,18 @@ fn render_messages_and_input(
                 });
                 ui.add_space(40.0_f32);
             } else {
+                let search_active = ui_state.show_search_bar && !ui_state.search_query.is_empty();
+                let query_lower = ui_state.search_query.to_lowercase();
                 for msg in &chat.messages {
-                    render_single_message(ui, msg, action);
+                    let is_match = search_active && msg.content.to_lowercase().contains(&query_lower);
+                    if search_active && !is_match {
+                        // Dim non-matching messages
+                        ui.set_opacity(0.35);
+                        render_single_message(ui, msg, action);
+                        ui.set_opacity(1.0);
+                    } else {
+                        render_single_message(ui, msg, action);
+                    }
                 }
             }
 
@@ -503,13 +620,17 @@ fn render_messages_and_input(
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spinner();
+                            let t = ui.ctx().input(|i| i.time);
+                            let dot_phase = ((t * 2.0) as usize) % 4;
+                            let dots = match dot_phase { 0 => ".", 1 => "..", 2 => "...", _ => "" };
                             let status_text = if let Some(tool) = &ui_state.current_running_tool {
-                                format!("● Executing tool: `{}`...", tool)
+                                format!("Executing: {}{}", tool, dots)
                             } else if let Some(spy) = &ui_state.http_spy_status {
-                                format!("● {}", spy)
+                                format!("HTTP: {}", spy)
                             } else {
-                                format!("Claude ({}) is thinking & generating...", format_model_label(&config.model))
+                                format!("Claude ({}) is thinking{}", format_model_label(&config.model), dots)
                             };
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
                             ui.label(
                                 RichText::new(status_text)
                                     .size(12.0)
