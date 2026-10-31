@@ -1,0 +1,16 @@
+[
+  {
+    "id": "account-1",
+    "name": "My Primary Claude Account",
+    "session_key": "sk-ant-sid01-REPLACE_WITH_YOUR_SESSION_KEY",
+    "org_uuid": "",
+    "is_active": true
+  },
+  {
+    "id": "account-2",
+    "name": "Backup / Team Account",
+    "session_key": "sk-ant-sid01-ANOTHER_SESSION_KEY_OPTIONAL",
+    "org_uuid": "",
+    "is_active": false
+  }
+]

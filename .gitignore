@@ -1,0 +1,14 @@
+/target
+*.exe
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.log
+scratch/
+accounts.json
+accounts_*.json
+temp_cookies*
+storage/
+BrowserAuthProfile/
+.env
