@@ -71,11 +71,11 @@ A fast, modern native Windows desktop application inspired by **Claude Desktop**
 
 ## 🚀 Quick Start
 
-Launch `ClaudeDesktop.exe`:
-```powershell
-.\ClaudeDesktop.exe
-```
-Or build from source:
+### 1-Click Setup & Launch (Windows)
+- Double-click **`setup.bat`** — Automatically checks for/installs Rust if missing, compiles the release binary, creates a Desktop shortcut, and gets everything ready.
+- Double-click **`run.bat`** — Instantly starts the app (or builds it if not built yet).
+
+### Manual Build from Source:
 ```powershell
 cargo run --release
 ```
