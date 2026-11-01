@@ -363,6 +363,34 @@ impl AppConfig {
         }
     }
 
+    /// Round-robin 1 prompt per account: advances active account to next ready account in the pool
+    pub fn rotate_to_next_ready_account(&mut self) -> Option<String> {
+        if self.accounts.len() <= 1 {
+            return self.active_account_id.clone();
+        }
+
+        let curr_idx = self.accounts.iter().position(|a| a.is_active).unwrap_or(0);
+        let count = self.accounts.len();
+
+        // 1. Look for next non-rate-limited account in round-robin order
+        for step in 1..count {
+            let next_idx = (curr_idx + step) % count;
+            if !self.accounts[next_idx].is_rate_limited {
+                let next_id = self.accounts[next_idx].id.clone();
+                self.set_active_account(&next_id);
+                let _ = self.save();
+                return Some(next_id);
+            }
+        }
+
+        // 2. Fallback to next account
+        let next_idx = (curr_idx + 1) % count;
+        let next_id = self.accounts[next_idx].id.clone();
+        self.set_active_account(&next_id);
+        let _ = self.save();
+        Some(next_id)
+    }
+
     pub fn add_or_update_account(&mut self, session_key: &str, org_uuid: &str, name: &str) -> String {
         let clean_sk = session_key.trim();
         if let Some(existing) = self.accounts.iter_mut().find(|a| a.session_key == clean_sk || (!org_uuid.is_empty() && a.org_uuid == org_uuid)) {

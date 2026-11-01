@@ -364,8 +364,12 @@ pub fn render_chat_view(
             });
         });
 
-    // Search bar (shown when toggled)
+    // Search bar (shown when toggled, close with Escape)
     if ui_state.show_search_bar {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ui_state.show_search_bar = false;
+            ui_state.search_query.clear();
+        }
         ui.add_space(4.0);
         Frame::new()
             .fill(CARD_BG)
@@ -887,8 +891,28 @@ fn render_messages_and_input(
                 }
             }
 
+            let input_id = egui::Id::new("chat_multiline_prompt_input");
+            let input_had_focus = ui.ctx().memory(|m| m.has_focus(input_id));
+            let just_closed_dialog = ui_state.file_dialog_closed_at
+                .map(|t| t.elapsed().as_millis() < 500)
+                .unwrap_or(false);
+
+            let send_key_pressed = !just_closed_dialog
+                && input_had_focus
+                && ui.input(|i| {
+                    (i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                    || (i.key_pressed(egui::Key::Enter) && (i.modifiers.ctrl || i.modifiers.command))
+                });
+
+            if send_key_pressed {
+                // Consume Enter before TextEdit sees it so it doesn't insert a stray newline
+                ui.ctx().input_mut(|i| {
+                    i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Enter, .. }));
+                });
+            }
+
             let multiline = TextEdit::multiline(&mut ui_state.input_text)
-                .id(egui::Id::new("chat_multiline_prompt_input"))
+                .id(input_id)
                 .desired_width(ui.available_width())
                 .desired_rows(line_count)
                 .frame(false)
@@ -901,13 +925,14 @@ fn render_messages_and_input(
                 .show(ui, |ui| ui.add(multiline))
                 .inner;
 
-            let just_closed_dialog = ui_state.file_dialog_closed_at
-                .map(|t| t.elapsed().as_millis() < 500)
-                .unwrap_or(false);
-
-            let enter_pressed = !just_closed_dialog
+            let enter_pressed = send_key_pressed || (
+                !just_closed_dialog
                 && input_resp.has_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                && ui.input(|i| {
+                    (i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                    || (i.key_pressed(egui::Key::Enter) && (i.modifiers.ctrl || i.modifiers.command))
+                })
+            );
 
             // Handle image/file paste directly when input box has focus
             if input_resp.has_focus() {

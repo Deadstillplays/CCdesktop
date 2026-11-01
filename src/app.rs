@@ -1,4 +1,4 @@
-﻿use crate::config::{AppConfig, Provider};
+use crate::config::{AppConfig, Provider};
 use crate::llm::{
     ensure_extract_script_exists, extract_claude_desktop_credentials, run_anthropic_turn,
     run_claude_web_turn, run_openai_turn, verify_claude_account, TurnEvent,
@@ -180,6 +180,13 @@ impl ClaudeDesktopApp {
             return;
         }
 
+        if self.config.combined_usage && self.config.accounts.len() > 1 {
+            let is_cur_limited = self.config.get_active_account().map(|a| a.is_rate_limited).unwrap_or(false);
+            if is_cur_limited {
+                self.config.rotate_to_next_ready_account();
+            }
+        }
+
         if let Some(active_id) = self.config.active_account_id.clone() {
             self.config.record_message_sent(&active_id);
             let _ = self.config.save();
@@ -266,7 +273,12 @@ impl ClaudeDesktopApp {
         let proj_mgr = self.project_mgr.clone();
         let event_tx = self.turn_tx.clone();
         let provider = self.config.provider.clone();
-        let account_pool = self.config.get_account_pool();
+        // Strict 1-prompt-per-account: only send the active account in the turn pool
+        let account_pool = if let Some(active) = self.config.get_active_account() {
+            vec![active.clone()]
+        } else {
+            self.config.get_account_pool()
+        };
         let combined_usage = self.config.combined_usage;
         let anthropic_key = self.config.anthropic_api_key.clone();
         let openai_key = self.config.openai_api_key.clone();
@@ -389,6 +401,12 @@ impl ClaudeDesktopApp {
                             self.cancel_token = None;
                             chat.updated_at = Utc::now();
                             let _ = self.storage.save_chat(chat);
+
+                            // Strict 1-prompt-per-account rotation: rotate to next ready account for next prompt
+                            if self.config.combined_usage && self.config.accounts.len() > 1 {
+                                self.config.rotate_to_next_ready_account();
+                            }
+
                             // Play completion beep
                             #[cfg(windows)]
                             unsafe {
@@ -410,6 +428,16 @@ impl ClaudeDesktopApp {
                             self.cancel_token = None;
                             chat.updated_at = Utc::now();
                             let _ = self.storage.save_chat(chat);
+
+                            // Rate limit handling: mark active account rate-limited and advance to next ready account
+                            if err.contains("429") || err.contains("message_limit_exceeded") || err.contains("reached its message limit") {
+                                if let Some(active_id) = self.config.active_account_id.clone() {
+                                    self.config.set_account_rate_limited(&active_id, true, None);
+                                }
+                                if self.config.combined_usage && self.config.accounts.len() > 1 {
+                                    self.config.rotate_to_next_ready_account();
+                                }
+                            }
                         }
                         TurnEvent::AccountSwitched { old_name, new_name, new_account_id } => {
                             let old_id = self.config.accounts.iter().find(|a| a.name == old_name).map(|a| a.id.clone());
@@ -653,15 +681,6 @@ impl eframe::App for ClaudeDesktopApp {
                                     self.chat_ui_state.pending_attachments.push(att);
                                     ctx.request_repaint();
                                 }
-                            } else {
-                                if !self.chat_ui_state.input_text.is_empty()
-                                    && !self.chat_ui_state.input_text.ends_with(' ')
-                                    && !self.chat_ui_state.input_text.ends_with('\n')
-                                {
-                                    self.chat_ui_state.input_text.push(' ');
-                                }
-                                self.chat_ui_state.input_text.push_str(&text);
-                                ctx.request_repaint();
                             }
                         }
                     }

@@ -1,4 +1,4 @@
-﻿use super::types::*;
+use super::types::*;
 use crate::config::ClaudeAccount;
 use crate::mcp::McpManager;
 use crate::project::ProjectManager;
@@ -181,47 +181,81 @@ pub fn map_claude_web_model(model: &str) -> Option<String> {
     Some(m)
 }
 
+fn truncate_tool_result(res: &str) -> String {
+    const MAX_LINES: usize = 100;
+    const MAX_CHARS: usize = 4000;
+
+    let lines: Vec<&str> = res.lines().collect();
+    if lines.len() <= MAX_LINES && res.len() <= MAX_CHARS {
+        return res.to_string();
+    }
+
+    if lines.len() > MAX_LINES {
+        let head = &lines[..40];
+        let tail = &lines[lines.len().saturating_sub(20)..];
+        let omitted = lines.len() - head.len() - tail.len();
+        format!(
+            "{}\n\n... [omitted {} lines for token efficiency] ...\n\n{}",
+            head.join("\n"),
+            omitted,
+            tail.join("\n")
+        )
+    } else {
+        let head = &res[..2000];
+        let tail = &res[res.len().saturating_sub(1000)..];
+        format!("{}\n\n... [truncated for token efficiency] ...\n\n{}", head, tail)
+    }
+}
+
 fn compact_earlier_tool_history(prompt: &str) -> String {
-    if prompt.len() < 8000 {
+    if prompt.len() < 5000 {
         return prompt.to_string();
     }
 
-    let mut compacted = String::new();
+    let mut blocks: Vec<(bool, String)> = Vec::new();
     let mut in_code_block = false;
-    let mut current_block = String::new();
+    let mut cur = String::new();
 
     for line in prompt.lines() {
         if line.starts_with("```") {
             if !in_code_block {
+                if !cur.is_empty() {
+                    blocks.push((false, std::mem::take(&mut cur)));
+                }
                 in_code_block = true;
-                current_block.clear();
-                current_block.push_str(line);
-                current_block.push('\n');
+                cur.push_str(line);
+                cur.push('\n');
             } else {
                 in_code_block = false;
-                current_block.push_str(line);
-                current_block.push('\n');
-
-                let line_count = current_block.lines().count();
-                if current_block.len() > 600 && line_count > 15 {
-                    compacted.push_str("```\n[Earlier tool output omitted for token efficiency: ");
-                    compacted.push_str(&format!("{} lines, {} bytes. Code definitions already in memory]\n```\n", line_count, current_block.len()));
-                } else {
-                    compacted.push_str(&current_block);
-                }
-                current_block.clear();
+                cur.push_str(line);
+                cur.push('\n');
+                blocks.push((true, std::mem::take(&mut cur)));
             }
-        } else if in_code_block {
-            current_block.push_str(line);
-            current_block.push('\n');
         } else {
-            compacted.push_str(line);
-            compacted.push('\n');
+            cur.push_str(line);
+            cur.push('\n');
         }
     }
+    if !cur.is_empty() {
+        blocks.push((in_code_block, cur));
+    }
 
-    if in_code_block {
-        compacted.push_str(&current_block);
+    // Preserve the last code block (the most recent tool result that Claude must see)
+    let last_code_idx = blocks.iter().rposition(|(is_code, _)| *is_code);
+
+    let mut compacted = String::new();
+    for (idx, (is_code, content)) in blocks.iter().enumerate() {
+        if *is_code && Some(idx) != last_code_idx {
+            let line_count = content.lines().count();
+            if content.len() > 500 && line_count > 15 {
+                compacted.push_str("```\n[Earlier tool output omitted for token efficiency: ");
+                compacted.push_str(&format!("{} lines, {} bytes. Code definitions already in memory]\n```\n", line_count, content.len()));
+            } else {
+                compacted.push_str(content);
+            }
+        } else {
+            compacted.push_str(content);
+        }
     }
 
     compacted
@@ -1033,8 +1067,8 @@ pub async fn run_claude_web_turn(
 
     let history_len = history.len();
     if history_len > 1 {
-        // Keep at most the last 8 turns to prevent massive payloads and rate limit flags
-        let start_idx = if history_len > 9 { history_len - 9 } else { 0 };
+        // Keep at most the last 4 turns for token efficiency
+        let start_idx = if history_len > 5 { history_len - 5 } else { 0 };
         initial_prompt.push_str("<conversation_history>\n");
         for msg in &history[start_idx..history_len - 1] {
             let role_label = if msg.role == "user" { "User" } else { "Assistant" };
@@ -1061,8 +1095,8 @@ pub async fn run_claude_web_turn(
                 for tc in &msg.tool_calls {
                     let res_preview = match &tc.result {
                         Some(r) => {
-                            if r.len() > 150 {
-                                format!("{}...", &r[..150])
+                            if r.len() > 100 {
+                                format!("{}...", &r[..100])
                             } else {
                                 r.clone()
                             }
@@ -1123,7 +1157,20 @@ pub async fn run_claude_web_turn(
         initial_prompt.push_str("<available_tools>\n");
         for t in &tools_json_array {
             let name = t["name"].as_str().unwrap_or("");
-            let desc = t["description"].as_str().unwrap_or("");
+            let mut desc = t["description"].as_str().unwrap_or("").trim().to_string();
+            if desc.len() > 100 {
+                if let Some(dot_idx) = desc.find('.') {
+                    if dot_idx < 100 {
+                        desc.truncate(dot_idx + 1);
+                    } else {
+                        desc.truncate(97);
+                        desc.push_str("...");
+                    }
+                } else {
+                    desc.truncate(97);
+                    desc.push_str("...");
+                }
+            }
             initial_prompt.push_str(&format!("- `{}`: {}\n", name, desc));
         }
         initial_prompt.push_str("</available_tools>\n\n");
@@ -1197,7 +1244,7 @@ pub async fn run_claude_web_turn(
     let mut use_model_param = mapped_model.is_some();
     let mut next_prompt = initial_prompt;
     let mut accumulated_full_text = String::new();
-    let max_iterations = 8;
+    let max_iterations = 4;
     let mut iteration = 0;
     let mut concurrency_retries = 0;
 
@@ -1578,12 +1625,13 @@ pub async fn run_claude_web_turn(
                     yield_for_user_interaction = true;
                 }
 
+                let truncated_res = truncate_tool_result(&res_str);
                 let args_display = serde_json::to_string(&args_val).unwrap_or_else(|_| "{}".to_string());
                 next_prompt.push_str(&format!(
                     "\n\n[Action: Executed tool `{}` with arguments: {}]\n[Tool Result]:\n```\n{}\n```\n",
                     pt.name,
                     args_display,
-                    res_str
+                    truncated_res
                 ));
             }
 
