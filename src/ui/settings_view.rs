@@ -37,6 +37,9 @@ pub enum SettingsViewAction {
     ToggleCombinedUsage(bool),
     ReloadAccountsFile,
     OpenAccountsFile,
+    ValidateAllAccounts,
+    ResetAllLimits,
+    RemoveExpiredAccounts,
 }
 
 pub fn render_settings_view(
@@ -186,14 +189,23 @@ pub fn render_settings_view(
                                     .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
                                     .inner_margin(egui::Margin::symmetric(10, 8))
                                     .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
                                             if ui.button(RichText::new("📁 Open accounts.json").size(12.0).strong()).clicked() {
                                                 action = Some(SettingsViewAction::OpenAccountsFile);
                                             }
-                                            if ui.button(RichText::new("🔄 Reload accounts.json").size(12.0)).clicked() {
+                                            if ui.button(RichText::new("🔄 Reload").size(12.0)).clicked() {
                                                 action = Some(SettingsViewAction::ReloadAccountsFile);
                                             }
-                                            ui.label(RichText::new("💡 Edit accounts in JSON. Safe for shipping builds.").size(11.0).color(TEXT_MUTED));
+                                            let val_text = if state.is_verifying_account { "⏳ Checking..." } else { "🔍 Validate All" };
+                                            if ui.add_enabled(!state.is_verifying_account, egui::Button::new(RichText::new(val_text).size(12.0))).clicked() {
+                                                action = Some(SettingsViewAction::ValidateAllAccounts);
+                                            }
+                                            if ui.button(RichText::new("⚡ Reset Limits").size(12.0)).clicked() {
+                                                action = Some(SettingsViewAction::ResetAllLimits);
+                                            }
+                                            if ui.button(RichText::new("🧹 Remove Expired").size(12.0)).clicked() {
+                                                action = Some(SettingsViewAction::RemoveExpiredAccounts);
+                                            }
                                         });
                                     });
 
@@ -205,6 +217,9 @@ pub fn render_settings_view(
                                 } else {
                                     for acc in &config.accounts {
                                         let is_active = acc.is_active;
+                                        let is_expired = acc.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid")).unwrap_or(false);
+                                        let is_limited = acc.is_rate_limited;
+
                                         Frame::new()
                                             .fill(if is_active { CARD_HOVER_BG } else { PANEL_BG })
                                             .corner_radius(CornerRadius::same(6))
@@ -214,9 +229,19 @@ pub fn render_settings_view(
                                                 ui.horizontal(|ui| {
                                                     ui.label(RichText::new(if is_active { "●" } else { "○" }).color(if is_active { GREEN_STATUS } else { TEXT_MUTED }));
                                                     ui.label(RichText::new(&acc.name).size(13.0).color(if is_active { ACCENT_PEACH } else { TEXT_PRIMARY }).strong());
+                                                    
+                                                    // Status badge
+                                                    if is_expired {
+                                                        ui.label(RichText::new("❌ Expired (403)").size(11.0).color(Color32::from_rgb(235, 80, 80)).strong());
+                                                    } else if is_limited {
+                                                        ui.label(RichText::new("⏳ Limited").size(11.0).color(Color32::from_rgb(240, 180, 50)));
+                                                    } else {
+                                                        ui.label(RichText::new("✓ Ready").size(11.0).color(GREEN_STATUS));
+                                                    }
+
                                                     if !acc.org_uuid.is_empty() {
                                                         let short_uuid = if acc.org_uuid.len() > 12 { &acc.org_uuid[..12] } else { &acc.org_uuid };
-                                                        ui.label(RichText::new(format!("(Org: {}...)", short_uuid)).size(11.0).color(TEXT_MUTED));
+                                                        ui.label(RichText::new(format!("({})", short_uuid)).size(10.5).color(TEXT_MUTED));
                                                     }
 
                                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -333,6 +358,7 @@ pub fn render_settings_view(
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Quick select:").size(11.0).color(TEXT_MUTED));
                     for (lbl, m) in &[
+                        ("Sonnet 4.6 (Thinking)", "claude-4-6-sonnet"),
                         ("Sonnet 5.5 (Flagship)", "claude-sonnet-5-5"),
                         ("Opus 5.5", "claude-opus-5-5"),
                         ("Haiku 5.5", "claude-haiku-5-5"),

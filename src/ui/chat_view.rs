@@ -63,6 +63,7 @@ pub struct ChatViewAction {
 }
 
 pub const AVAILABLE_MODELS: &[(&str, &str)] = &[
+    ("Claude 4.6 Sonnet (Thinking)", "claude-4-6-sonnet"),
     ("Claude 5.5 Sonnet", "claude-sonnet-5-5"),
     ("Claude 5.5 Opus", "claude-opus-5-5"),
     ("Claude 5.5 Haiku", "claude-haiku-5-5"),
@@ -452,6 +453,9 @@ pub fn render_chat_view(
 
 fn format_model_label(model_id: &str) -> String {
     let lower = model_id.to_lowercase();
+    if lower.contains("4.6") || lower.contains("4-6") {
+        return "Claude 4.6 Sonnet".to_string();
+    }
     if lower.contains("opus-5-5") || (lower.contains("5.5") && lower.contains("opus")) {
         return "Claude 5.5 Opus".to_string();
     }

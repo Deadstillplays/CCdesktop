@@ -154,6 +154,10 @@ pub fn map_claude_web_model(model: &str) -> Option<String> {
     if m.is_empty() {
         return None;
     }
+    // Claude 4.6 Sonnet (Thinking / Hybrid reasoning)
+    if m.contains("4.6") || m.contains("4-6") {
+        return Some("claude-4-6-sonnet".to_string());
+    }
     // Claude 5.5 Family (Late 2026 flagship)
     if m.contains("opus-5-5") || (m.contains("5.5") && m.contains("opus")) {
         return Some("claude-opus-5-5".to_string());
@@ -281,11 +285,10 @@ pub async fn run_claude_web_turn(
         return;
     }
 
-    let mut account_idx = 0;
-    let mut current_acc = account_pool[account_idx].clone();
+    let current_acc = account_pool[0].clone();
 
-    let mut clean_key = current_acc.session_key.trim().to_string();
-    let mut cookie_val = if clean_key.starts_with("sessionKey=") {
+    let clean_key = current_acc.session_key.trim().to_string();
+    let cookie_val = if clean_key.starts_with("sessionKey=") {
         clean_key.clone()
     } else {
         format!("sessionKey={}", clean_key)
@@ -1107,6 +1110,11 @@ pub async fn run_claude_web_turn(
                 }
             }
             if !text.is_empty() {
+                if msg.role != "user" && text.len() > 600 {
+                    let head = &text[..350];
+                    let tail = &text[text.len().saturating_sub(150)..];
+                    text = format!("{}\n... [truncated for token efficiency] ...\n{}", head.trim(), tail.trim());
+                }
                 initial_prompt.push_str(&format!("{}: {}\n\n", role_label, text.trim()));
             }
         }
@@ -1158,18 +1166,16 @@ pub async fn run_claude_web_turn(
         for t in &tools_json_array {
             let name = t["name"].as_str().unwrap_or("");
             let mut desc = t["description"].as_str().unwrap_or("").trim().to_string();
-            if desc.len() > 100 {
-                if let Some(dot_idx) = desc.find('.') {
-                    if dot_idx < 100 {
-                        desc.truncate(dot_idx + 1);
-                    } else {
-                        desc.truncate(97);
-                        desc.push_str("...");
-                    }
+            if let Some(dot_idx) = desc.find('.') {
+                if dot_idx < 70 {
+                    desc.truncate(dot_idx + 1);
                 } else {
-                    desc.truncate(97);
+                    desc.truncate(67);
                     desc.push_str("...");
                 }
+            } else if desc.len() > 70 {
+                desc.truncate(67);
+                desc.push_str("...");
             }
             initial_prompt.push_str(&format!("- `{}`: {}\n", name, desc));
         }
@@ -1188,7 +1194,7 @@ pub async fn run_claude_web_turn(
         }
     };
 
-    let mut headers = build_claude_headers(&cookie_val);
+    let headers = build_claude_headers(&cookie_val);
     let mut conv_url = format!("https://claude.ai/api/organizations/{}/chat_conversations", resolved_org);
 
     // If this is a new conversation session, register it on Claude.ai once with a clean title
@@ -1359,54 +1365,7 @@ pub async fn run_claude_web_turn(
             let is_cloudflare_challenge = status.as_u16() == 403 && (err_body.contains("Just a moment") || err_body.contains("Cloudflare"));
             let is_auth_error = status.as_u16() == 401 || (status.as_u16() == 403 && !use_model_param && !is_cloudflare_challenge);
 
-            // Combined usage auto-failover: if this account reached its limit, switch to next account!
-            if (is_rate_limit || is_auth_error) && combined_usage && account_idx + 1 < account_pool.len() {
-                let old_acc = current_acc.clone();
-                account_idx += 1;
-                current_acc = account_pool[account_idx].clone();
-                concurrency_retries = 0;
-
-                let _ = event_tx.send(TurnEvent::AccountSwitched {
-                    old_name: old_acc.name.clone(),
-                    new_name: current_acc.name.clone(),
-                    new_account_id: current_acc.id.clone(),
-                });
-
-                clean_key = current_acc.session_key.trim().to_string();
-                cookie_val = if clean_key.starts_with("sessionKey=") {
-                    clean_key.clone()
-                } else {
-                    format!("sessionKey={}", clean_key)
-                };
-
-                resolved_org = current_acc.org_uuid.trim().to_string();
-                if resolved_org.is_empty() {
-                    if let Ok((uuid, _)) = verify_claude_account(&clean_key).await {
-                        resolved_org = uuid;
-                    }
-                }
-
-                headers = build_claude_headers(&cookie_val);
-
-                conversation_id = uuid::Uuid::new_v4().to_string();
-                let _ = event_tx.send(TurnEvent::ConversationCreated(conversation_id.clone()));
-                conv_url = format!("https://claude.ai/api/organizations/{}/chat_conversations", resolved_org);
-                let _ = client
-                    .post(&conv_url)
-                    .headers(headers.clone())
-                    .json(&json!({"uuid": conversation_id, "name": "Chat"}))
-                    .send()
-                    .await;
-
-                comp2_url = format!(
-                    "https://claude.ai/api/organizations/{}/chat_conversations/{}/completion2",
-                    resolved_org, conversation_id
-                );
-
-                use_model_param = mapped_model.is_some();
-                continue 'outer;
-            }
-
+            // No in-turn account cascade. Errors are handled per-turn; app.rs rotates for the NEXT prompt.
             if is_concurrency {
                 let _ = event_tx.send(TurnEvent::Error(
                     "Claude.ai concurrency limit reached (Anthropic server is still processing a previous turn). Please wait a few seconds and send your message again.".to_string()

@@ -50,6 +50,8 @@ pub struct ClaudeDesktopApp {
     pub mcp_sync_rx: Receiver<(McpConfigFile, HashMap<String, ServerStatus>, Vec<McpTool>)>,
     pub verify_account_tx: Sender<Result<(Option<String>, String, String), String>>,
     pub verify_account_rx: Receiver<Result<(Option<String>, String, String), String>>,
+    pub batch_validate_tx: Sender<Vec<(String, bool, Option<String>)>>,
+    pub batch_validate_rx: Receiver<Vec<(String, bool, Option<String>)>>,
 
     // Native keyboard interceptor state (bypasses egui clipboard swallow bug)
     pub v_key_was_down: bool,
@@ -89,6 +91,7 @@ impl ClaudeDesktopApp {
         let (tool_test_tx, tool_test_rx) = unbounded();
         let (mcp_sync_tx, mcp_sync_rx) = unbounded();
         let (verify_account_tx, verify_account_rx) = unbounded();
+        let (batch_validate_tx, batch_validate_rx) = unbounded();
 
         let mut chats = storage.list_chats();
         for chat in &mut chats {
@@ -143,6 +146,8 @@ impl ClaudeDesktopApp {
             mcp_sync_rx,
             verify_account_tx,
             verify_account_rx,
+            batch_validate_tx,
+            batch_validate_rx,
             v_key_was_down: false,
             generating_chat_id: None,
             cancel_token: None,
@@ -430,11 +435,12 @@ impl ClaudeDesktopApp {
                             let _ = self.storage.save_chat(chat);
 
                             // Rate limit OR expired session handling: mark active account rate-limited and advance to next ready account
-                            if err.contains("429") || err.contains("message_limit_exceeded") || err.contains("reached its message limit")
-                                || err.contains("403") || err.contains("401") || err.contains("account_session_invalid") || err.contains("Invalid authorization")
-                            {
+                            let is_expired = err.contains("403") || err.contains("401") || err.contains("account_session_invalid") || err.contains("Invalid authorization");
+                            let is_limited = err.contains("429") || err.contains("message_limit_exceeded") || err.contains("reached its message limit");
+                            if is_expired || is_limited {
                                 if let Some(active_id) = self.config.active_account_id.clone() {
-                                    self.config.set_account_rate_limited(&active_id, true, None);
+                                    let reset_note = if is_expired { Some("Session Expired (403)".to_string()) } else { None };
+                                    self.config.set_account_rate_limited(&active_id, true, reset_note);
                                 }
                                 if self.config.combined_usage && self.config.accounts.len() > 1 {
                                     self.config.rotate_to_next_ready_account();
@@ -490,6 +496,35 @@ impl ClaudeDesktopApp {
                     self.settings_view_state.toast_message = Some(format!("Verification failed: {}", e));
                 }
             }
+        }
+
+        while let Ok(batch) = self.batch_validate_rx.try_recv() {
+            self.settings_view_state.is_verifying_account = false;
+            let mut valid_count = 0;
+            let mut invalid_count = 0;
+            for (id, is_valid, opt) in batch {
+                if let Some(acc) = self.config.accounts.iter_mut().find(|a| a.id == id) {
+                    if is_valid {
+                        valid_count += 1;
+                        acc.is_rate_limited = false;
+                        acc.rate_limit_reset = None;
+                        if let Some(org) = opt {
+                            if acc.org_uuid.is_empty() {
+                                acc.org_uuid = org;
+                            }
+                        }
+                    } else {
+                        invalid_count += 1;
+                        acc.is_rate_limited = true;
+                        acc.rate_limit_reset = Some("Session Expired (403)".to_string());
+                    }
+                }
+            }
+            let _ = self.config.save();
+            self.settings_view_state.toast_message = Some(format!(
+                "Validation complete: {} ready, {} expired/invalid",
+                valid_count, invalid_count
+            ));
         }
     }
 
@@ -1268,6 +1303,30 @@ impl eframe::App for ClaudeDesktopApp {
                                         self.settings_view_state.toast_message = Some(format!("❌ Failed to reload accounts: {}", e));
                                     }
                                 }
+                            }
+                            SettingsViewAction::ValidateAllAccounts => {
+                                let accounts: Vec<(String, String)> = self.config.accounts.iter().map(|a| (a.id.clone(), a.session_key.clone())).collect();
+                                let tx = self.batch_validate_tx.clone();
+                                self.settings_view_state.is_verifying_account = true;
+                                self.tokio_runtime.spawn(async move {
+                                    let mut results = Vec::new();
+                                    for (id, sk) in accounts {
+                                        let res = verify_claude_account(&sk).await;
+                                        match res {
+                                            Ok((org_uuid, _name)) => results.push((id, true, Some(org_uuid))),
+                                            Err(e) => results.push((id, false, Some(e))),
+                                        }
+                                    }
+                                    let _ = tx.send(results);
+                                });
+                            }
+                            SettingsViewAction::ResetAllLimits => {
+                                self.config.reset_all_rate_limits();
+                                self.settings_view_state.toast_message = Some("⚡ All account limits reset! All accounts marked ready.".to_string());
+                            }
+                            SettingsViewAction::RemoveExpiredAccounts => {
+                                let count = self.config.remove_expired_accounts();
+                                self.settings_view_state.toast_message = Some(format!("🧹 Removed {} expired accounts from pool", count));
                             }
                         }
                     }

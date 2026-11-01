@@ -355,12 +355,41 @@ impl AppConfig {
         self.active_account_id = Some(id.to_string());
         for acc in &mut self.accounts {
             acc.is_active = acc.id == id;
+            if acc.is_active {
+                // If user activated this account, unmark rate limit so it can be used/tested immediately
+                acc.is_rate_limited = false;
+                acc.rate_limit_reset = None;
+            }
         }
         if let Some(active) = self.accounts.iter().find(|a| a.id == id) {
             self.claude_session_key = active.session_key.clone();
             self.claude_org_uuid = active.org_uuid.clone();
             self.claude_user_name = active.name.clone();
         }
+    }
+
+    pub fn reset_all_rate_limits(&mut self) {
+        for acc in &mut self.accounts {
+            acc.is_rate_limited = false;
+            acc.rate_limit_reset = None;
+        }
+        let _ = self.save();
+    }
+
+    pub fn remove_expired_accounts(&mut self) -> usize {
+        let before = self.accounts.len();
+        self.accounts.retain(|a| {
+            let is_expired = a.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid")).unwrap_or(false);
+            !is_expired
+        });
+        if !self.accounts.iter().any(|a| a.is_active) {
+            if let Some(first) = self.accounts.first() {
+                let id = first.id.clone();
+                self.set_active_account(&id);
+            }
+        }
+        let _ = self.save();
+        before.saturating_sub(self.accounts.len())
     }
 
     /// Round-robin 1 prompt per account: advances active account to next ready account in the pool
@@ -372,10 +401,32 @@ impl AppConfig {
         let curr_idx = self.accounts.iter().position(|a| a.is_active).unwrap_or(0);
         let count = self.accounts.len();
 
-        // 1. Look for next non-rate-limited account in round-robin order
+        // 1. Look for next non-rate-limited and non-expired account in round-robin order
         for step in 1..count {
             let next_idx = (curr_idx + step) % count;
-            if !self.accounts[next_idx].is_rate_limited {
+            let acc = &self.accounts[next_idx];
+            let is_expired = acc.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid")).unwrap_or(false);
+            if !acc.is_rate_limited && !is_expired {
+                let next_id = acc.id.clone();
+                self.set_active_account(&next_id);
+                let _ = self.save();
+                return Some(next_id);
+            }
+        }
+
+        // 2. If current account itself is not rate-limited and not expired, keep it
+        let cur_acc = &self.accounts[curr_idx];
+        let cur_expired = cur_acc.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid")).unwrap_or(false);
+        if !cur_acc.is_rate_limited && !cur_expired {
+            return self.active_account_id.clone();
+        }
+
+        // 3. Fallback: find ANY non-expired account (even if previously marked rate-limited) and unmark it
+        for step in 0..count {
+            let next_idx = (curr_idx + step) % count;
+            let is_expired = self.accounts[next_idx].rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid")).unwrap_or(false);
+            if !is_expired {
+                self.accounts[next_idx].is_rate_limited = false;
                 let next_id = self.accounts[next_idx].id.clone();
                 self.set_active_account(&next_id);
                 let _ = self.save();
@@ -383,12 +434,8 @@ impl AppConfig {
             }
         }
 
-        // 2. Fallback to next account
-        let next_idx = (curr_idx + 1) % count;
-        let next_id = self.accounts[next_idx].id.clone();
-        self.set_active_account(&next_id);
-        let _ = self.save();
-        Some(next_id)
+        // 4. Default fallback: keep current
+        self.active_account_id.clone()
     }
 
     pub fn add_or_update_account(&mut self, session_key: &str, org_uuid: &str, name: &str) -> String {
