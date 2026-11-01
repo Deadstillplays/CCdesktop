@@ -1424,6 +1424,11 @@ pub async fn run_claude_web_turn(
                     format!("Claude.ai Rate Limited (429): {}. Switch accounts or wait a few moments to continue.", err_body)
                 };
                 let _ = event_tx.send(TurnEvent::Error(friendly_msg));
+            } else if is_auth_error {
+                let _ = event_tx.send(TurnEvent::Error(format!(
+                    "Claude.ai Error ({} Forbidden - account_session_invalid): The session key for '{}' has expired. Automatically switching to the next ready account.",
+                    status, current_acc.name
+                )));
             } else {
                 let _ = event_tx.send(TurnEvent::Error(format!(
                     "Claude.ai Error ({}): {}. Please verify your account credentials.",

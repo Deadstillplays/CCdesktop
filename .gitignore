@@ -12,3 +12,6 @@ temp_cookies*
 storage/
 BrowserAuthProfile/
 .env
+
+*.rar
+

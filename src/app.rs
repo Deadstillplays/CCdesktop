@@ -429,8 +429,10 @@ impl ClaudeDesktopApp {
                             chat.updated_at = Utc::now();
                             let _ = self.storage.save_chat(chat);
 
-                            // Rate limit handling: mark active account rate-limited and advance to next ready account
-                            if err.contains("429") || err.contains("message_limit_exceeded") || err.contains("reached its message limit") {
+                            // Rate limit OR expired session handling: mark active account rate-limited and advance to next ready account
+                            if err.contains("429") || err.contains("message_limit_exceeded") || err.contains("reached its message limit")
+                                || err.contains("403") || err.contains("401") || err.contains("account_session_invalid") || err.contains("Invalid authorization")
+                            {
                                 if let Some(active_id) = self.config.active_account_id.clone() {
                                     self.config.set_account_rate_limited(&active_id, true, None);
                                 }
