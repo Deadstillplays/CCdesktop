@@ -109,21 +109,29 @@ pub fn render_chat_view(
         .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Clean conversation title display
+                // Clean conversation title display (safely bounded to prevent overlapping controls)
+                let avail_w = ui.available_width();
+                let is_compact = avail_w < 920.0;
+                let max_chars = if is_compact { 18 } else { 32 };
                 let raw_title = chat.title.trim();
                 let display_title = if raw_title.is_empty() {
                     "New Conversation".to_string()
-                } else if raw_title.len() > 36 {
-                    format!("{}...", &raw_title[..33])
+                } else if raw_title.len() > max_chars {
+                    format!("{}...", &raw_title[..max_chars])
                 } else {
                     raw_title.to_string()
                 };
 
-                ui.label(
-                    RichText::new(&display_title)
-                        .size(15.0)
-                        .color(TEXT_PRIMARY)
-                        .strong(),
+                let title_box_w = if is_compact { 110.0 } else { 160.0 };
+                ui.add_sized(
+                    [title_box_w, 22.0],
+                    egui::Label::new(
+                        RichText::new(&display_title)
+                            .size(14.0)
+                            .color(TEXT_PRIMARY)
+                            .strong(),
+                    )
+                    .truncate(),
                 );
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -247,10 +255,15 @@ pub fn render_chat_view(
                         .unwrap_or(if config.claude_user_name.is_empty() { "No Account" } else { &config.claude_user_name });
                     let (ready_cnt, limited_cnt) = config.pool_stats();
                     let total_msgs = config.total_pool_messages();
-                    let button_text = if config.combined_usage && config.accounts.len() > 1 {
-                        format!("👤 {}  🔀 Pool ({}/{}) ▼", active_acc_name, ready_cnt, config.accounts.len())
+                    let short_active_name = if active_acc_name.len() > 16 {
+                        format!("{}...", &active_acc_name[..14])
                     } else {
-                        format!("👤 {} ▼", active_acc_name)
+                        active_acc_name.to_string()
+                    };
+                    let button_text = if config.combined_usage && config.accounts.len() > 1 {
+                        format!("👤 {}  🔀 Pool ({}/{}) ▼", short_active_name, ready_cnt, config.accounts.len())
+                    } else {
+                        format!("👤 {} ▼", short_active_name)
                     };
                     ui.menu_button(
                         RichText::new(button_text)
@@ -289,38 +302,54 @@ pub fn render_chat_view(
                             if config.accounts.is_empty() {
                                 ui.label(RichText::new("No extra accounts added").size(11.0).color(TEXT_MUTED));
                             } else {
-                                for acc in &config.accounts {
-                                    let is_active = acc.is_active;
-                                    let status_suffix = if acc.is_rate_limited {
-                                        " [⏳ Limited]"
-                                    } else {
-                                        ""
-                                    };
-                                    let label = if is_active {
-                                        format!("● {} ({} msgs){}", acc.name, acc.messages_sent, status_suffix)
-                                    } else if config.combined_usage {
-                                        format!("○ {} ({} msgs){}", acc.name, acc.messages_sent, status_suffix)
-                                    } else {
-                                        format!("   {} ({} msgs){}", acc.name, acc.messages_sent, status_suffix)
-                                    };
-                                    let text_color = if acc.is_rate_limited {
-                                        RED_STATUS
-                                    } else if is_active {
-                                        ACCENT_PEACH
-                                    } else {
-                                        TEXT_PRIMARY
-                                    };
-                                    if ui
-                                        .selectable_label(
-                                            is_active,
-                                            RichText::new(label).size(12.0).color(text_color),
-                                        )
-                                        .clicked()
-                                    {
-                                        action.switch_account = Some(acc.id.clone());
-                                        ui.close_menu();
-                                    }
-                                }
+                                ScrollArea::vertical()
+                                    .max_height(280.0_f32)
+                                    .show(ui, |ui| {
+                                        for acc in &config.accounts {
+                                            let is_active = acc.is_active;
+                                            let is_expired = acc.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid") || s.contains("403")).unwrap_or(false);
+                                            let is_limited = acc.is_rate_limited && !is_expired;
+
+                                            let display_name = if acc.name.len() > 30 {
+                                                format!("{}...", &acc.name[..28])
+                                            } else {
+                                                acc.name.clone()
+                                            };
+
+                                            let (badge, text_color) = if is_expired {
+                                                (" [❌ Expired]", Color32::from_rgb(235, 80, 80))
+                                            } else if is_limited {
+                                                (" [⏳ Limited]", Color32::from_rgb(240, 180, 50))
+                                            } else if is_active {
+                                                (" [✓ Active]", ACCENT_PEACH)
+                                            } else {
+                                                ("", TEXT_PRIMARY)
+                                            };
+
+                                            let prefix = if is_active { "●" } else { "○" };
+                                            let label = format!("{} {} ({} msgs){}", prefix, display_name, acc.messages_sent, badge);
+
+                                            ui.horizontal(|ui| {
+                                                if ui
+                                                    .selectable_label(
+                                                        is_active,
+                                                        RichText::new(label).size(11.5).color(text_color),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    action.switch_account = Some(acc.id.clone());
+                                                    ui.close_menu();
+                                                }
+
+                                                if is_expired {
+                                                    if ui.small_button(RichText::new("🔑 Re-Login").size(10.5).color(Color32::WHITE).strong()).clicked() {
+                                                        action.start_auto_google_login = true;
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    });
                             }
 
                             ui.separator();
@@ -1352,6 +1381,36 @@ fn render_single_message(ui: &mut Ui, msg: &ChatMessage, action: &mut ChatViewAc
             // Message content
             if !msg.content.trim().is_empty() {
                 render_formatted_content(ui, &msg.content, action);
+
+                // Actionable Session Expired Callout
+                let is_session_expired = msg.content.contains("account_session_invalid")
+                    || (msg.content.contains("403") && msg.content.contains("expired"));
+                if is_session_expired {
+                    ui.add_space(8.0_f32);
+                    Frame::new()
+                        .fill(Color32::from_rgb(42, 18, 18))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(220, 60, 60)))
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("🔑 Session Expired / Invalid Account").size(13.0).color(Color32::from_rgb(255, 110, 110)).strong());
+                            });
+                            ui.label(RichText::new("The session key for this account has expired on Claude.ai. Sign in again to refresh credentials:").size(11.5).color(TEXT_SECONDARY));
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui.add(egui::Button::new(RichText::new("🌐 Launch Browser Login (Chromium)").size(11.5).color(Color32::WHITE).strong()).fill(ACCENT_PEACH)).clicked() {
+                                    action.start_auto_google_login = true;
+                                }
+                                if ui.button(RichText::new("📋 Paste New Key from Clipboard").size(11.5)).clicked() {
+                                    action.quick_add_clipboard_account = true;
+                                }
+                                if ui.button(RichText::new("⚙ Manage Accounts in Settings").size(11.5)).clicked() {
+                                    action.open_settings = true;
+                                }
+                            });
+                        });
+                }
             }
 
             // Render Tool Calls

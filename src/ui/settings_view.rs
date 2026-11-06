@@ -214,55 +214,62 @@ pub fn render_settings_view(
 
                                 ui.add_space(8.0);
 
-                                // List existing accounts
+                                // List existing accounts (scrollable)
                                 if config.accounts.is_empty() {
                                     ui.label(RichText::new("No accounts added yet. Add one below or sync from Claude Desktop.").size(11.5).color(TEXT_MUTED));
                                 } else {
-                                    for acc in &config.accounts {
-                                        let is_active = acc.is_active;
-                                        let is_expired = acc.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid")).unwrap_or(false);
-                                        let is_limited = acc.is_rate_limited;
+                                    ScrollArea::vertical()
+                                        .max_height(240.0_f32)
+                                        .show(ui, |ui| {
+                                            for acc in &config.accounts {
+                                                let is_active = acc.is_active;
+                                                let is_expired = acc.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid") || s.contains("403")).unwrap_or(false);
+                                                let is_limited = acc.is_rate_limited && !is_expired;
 
-                                        Frame::new()
-                                            .fill(if is_active { CARD_HOVER_BG } else { PANEL_BG })
-                                            .corner_radius(CornerRadius::same(6))
-                                            .stroke(Stroke::new(1.0_f32, if is_active { ACCENT_PEACH } else { BORDER_SUBTLE }))
-                                            .inner_margin(egui::Margin::symmetric(10, 8))
-                                            .show(ui, |ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.label(RichText::new(if is_active { "●" } else { "○" }).color(if is_active { GREEN_STATUS } else { TEXT_MUTED }));
-                                                    ui.label(RichText::new(&acc.name).size(13.0).color(if is_active { ACCENT_PEACH } else { TEXT_PRIMARY }).strong());
-                                                    
-                                                    // Status badge
-                                                    if is_expired {
-                                                        ui.label(RichText::new("❌ Expired (403)").size(11.0).color(Color32::from_rgb(235, 80, 80)).strong());
-                                                    } else if is_limited {
-                                                        ui.label(RichText::new("⏳ Limited").size(11.0).color(Color32::from_rgb(240, 180, 50)));
-                                                    } else {
-                                                        ui.label(RichText::new("✓ Ready").size(11.0).color(GREEN_STATUS));
-                                                    }
-
-                                                    if !acc.org_uuid.is_empty() {
-                                                        let short_uuid = if acc.org_uuid.len() > 12 { &acc.org_uuid[..12] } else { &acc.org_uuid };
-                                                        ui.label(RichText::new(format!("({})", short_uuid)).size(10.5).color(TEXT_MUTED));
-                                                    }
-
-                                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                                        if ui.small_button("🗑 Delete").clicked() {
-                                                            action = Some(SettingsViewAction::DeleteAccount(acc.id.clone()));
-                                                        }
-                                                        if !is_active {
-                                                            if ui.button(RichText::new("Set Active").size(11.5)).clicked() {
-                                                                action = Some(SettingsViewAction::SwitchAccount(acc.id.clone()));
+                                                Frame::new()
+                                                    .fill(if is_active { CARD_HOVER_BG } else { PANEL_BG })
+                                                    .corner_radius(CornerRadius::same(6))
+                                                    .stroke(Stroke::new(1.0_f32, if is_active { ACCENT_PEACH } else { BORDER_SUBTLE }))
+                                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                                    .show(ui, |ui| {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(RichText::new(if is_active { "●" } else { "○" }).color(if is_active { GREEN_STATUS } else { TEXT_MUTED }));
+                                                            ui.label(RichText::new(&acc.name).size(12.5).color(if is_active { ACCENT_PEACH } else { TEXT_PRIMARY }).strong());
+                                                            
+                                                            // Status badge
+                                                            if is_expired {
+                                                                ui.label(RichText::new("❌ Expired (403)").size(11.0).color(Color32::from_rgb(235, 80, 80)).strong());
+                                                                if ui.small_button(RichText::new("🔑 Re-Login").size(10.5).color(Color32::WHITE)).clicked() {
+                                                                    action = Some(SettingsViewAction::StartChromiumAutoLogin(Some(acc.name.clone())));
+                                                                }
+                                                            } else if is_limited {
+                                                                ui.label(RichText::new("⏳ Limited").size(11.0).color(Color32::from_rgb(240, 180, 50)));
+                                                            } else {
+                                                                ui.label(RichText::new("✓ Ready").size(11.0).color(GREEN_STATUS));
                                                             }
-                                                        } else {
-                                                            ui.label(RichText::new("ACTIVE").size(11.0).color(GREEN_STATUS).strong());
-                                                        }
+
+                                                            if !acc.org_uuid.is_empty() {
+                                                                let short_uuid = if acc.org_uuid.len() > 10 { &acc.org_uuid[..10] } else { &acc.org_uuid };
+                                                                ui.label(RichText::new(format!("({})", short_uuid)).size(10.0).color(TEXT_MUTED));
+                                                            }
+
+                                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                                if ui.small_button("🗑 Delete").clicked() {
+                                                                    action = Some(SettingsViewAction::DeleteAccount(acc.id.clone()));
+                                                                }
+                                                                if !is_active {
+                                                                    if ui.button(RichText::new("Set Active").size(11.0)).clicked() {
+                                                                        action = Some(SettingsViewAction::SwitchAccount(acc.id.clone()));
+                                                                    }
+                                                                } else {
+                                                                    ui.label(RichText::new("ACTIVE").size(10.5).color(GREEN_STATUS).strong());
+                                                                }
+                                                            });
+                                                        });
                                                     });
-                                                });
-                                            });
-                                        ui.add_space(4.0);
-                                    }
+                                                ui.add_space(4.0);
+                                            }
+                                        });
                                 }
 
                                 ui.add_space(10.0);

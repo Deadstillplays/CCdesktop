@@ -913,8 +913,10 @@ impl eframe::App for ClaudeDesktopApp {
 
         // Left Panel: Sidebar
         egui::SidePanel::left("sidebar_panel")
-            .resizable(false)
-            .exact_width(260.0_f32)
+            .resizable(true)
+            .default_width(260.0_f32)
+            .min_width(180.0_f32)
+            .max_width(450.0_f32)
             .frame(
                 Frame::new()
                     .fill(SIDEBAR_BG)

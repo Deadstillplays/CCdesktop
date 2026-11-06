@@ -194,7 +194,10 @@ pub fn render_sidebar(
                                     ui.painter().rect_filled(rect, CornerRadius::same(1), ACCENT_PEACH);
                                 }
 
-                                let chat_label = ui.add(
+                                let del_btn_w = 18.0;
+                                let label_w = (ui.available_width() - del_btn_w - 6.0).max(40.0);
+                                let chat_label = ui.add_sized(
+                                    [label_w, 18.0],
                                     egui::Label::new(
                                         RichText::new(display_title)
                                             .size(12.0)
@@ -217,14 +220,9 @@ pub fn render_sidebar(
                                     resp.rename_chat_id = Some(chat.id.clone());
                                 }
 
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui
-                                        .small_button(RichText::new("×").size(11.0).color(TEXT_MUTED))
-                                        .clicked()
-                                    {
-                                        resp.delete_chat_id = Some(chat.id.clone());
-                                    }
-                                });
+                                if ui.small_button(RichText::new("×").size(11.0).color(TEXT_MUTED)).clicked() {
+                                    resp.delete_chat_id = Some(chat.id.clone());
+                                }
                             });
                         });
 
