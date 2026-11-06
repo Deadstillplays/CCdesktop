@@ -1022,6 +1022,76 @@ pub async fn run_claude_web_turn(
     }));
 
     // Dynamically register any persistent custom tools
+    tools_json_array.push(json!({
+        "name": "powershell_exec_admin",
+        "description": "Execute a PowerShell command with elevated Windows Administrator privileges (triggers UAC). Use for admin tasks, installing software, registry modification, service management, or driver setup.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "PowerShell command or script to execute elevated" }
+            },
+            "required": ["command"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "get_admin_status",
+        "description": "Check if current process and session have Windows Administrator (elevated) privileges.",
+        "input_schema": { "type": "object", "properties": {} }
+    }));
+    tools_json_array.push(json!({
+        "name": "get_network_info",
+        "description": "Get active network adapter details, local IPv4 addresses, link speeds, gateway, and DNS servers.",
+        "input_schema": { "type": "object", "properties": {} }
+    }));
+    tools_json_array.push(json!({
+        "name": "get_disk_usage",
+        "description": "Get disk drive capacities, free space, and used space across all drives, or measure folder size of a specified path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Optional folder path to calculate size" }
+            }
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "manage_windows_service",
+        "description": "Manage Windows Services: start, stop, restart, check status, or list all running services.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["start", "stop", "restart", "status", "list"], "description": "Action to perform" },
+                "service_name": { "type": "string", "description": "Name of the service (e.g. 'wuauserv', 'Spooler')" }
+            },
+            "required": ["action"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "get_windows_event_log",
+        "description": "Read recent system, application, or security events from the Windows Event Log.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "log_name": { "type": "string", "description": "Log name (e.g. 'Application', 'System')" },
+                "max_events": { "type": "integer", "description": "Number of recent events (default 20)" },
+                "level": { "type": "string", "enum": ["all", "error", "warning"], "description": "Severity level filter" }
+            },
+            "required": ["log_name"]
+        }
+    }));
+    tools_json_array.push(json!({
+        "name": "schedule_task",
+        "description": "Create a scheduled task via Windows Task Scheduler (schtasks) to run scripts or commands automatically.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_name": { "type": "string", "description": "Unique task name" },
+                "command": { "type": "string", "description": "Full command or executable path to run" },
+                "trigger": { "type": "string", "description": "Trigger schedule: 'once', 'daily HH:MM', 'onstart', 'onlogon'" }
+            },
+            "required": ["task_name", "command"]
+        }
+    }));
+
     let dynamic_tool_mgr = crate::tools::DynamicToolManager::new(active_folder.as_deref().unwrap_or("."));
     for ct in dynamic_tool_mgr.list_tools() {
         tools_json_array.push(json!({
@@ -1161,23 +1231,24 @@ pub async fn run_claude_web_turn(
             }
         }
 
-        initial_prompt.push_str("Directives:\n- Fully execute the task with autonomous problem-solving.\n- TOKEN EFFICIENCY: Read only what you need. When inspecting projects, use `read_project_skeleton` or `batch_read_files` first to see the module and symbol hierarchy without reading full file bodies.\n- AUTONOMOUS ACTION & CODE WRITING: DO NOT get stuck in endless search loops. Once you have located the target files or code (maximum 2 search/read steps), IMMEDIATELY modify or create the files using `write_file` or `edit_file`.\n- COMPILATION & DIAGNOSTICS: Always verify your changes using `check_syntax` or `compile_project`. Read error outputs and fix line numbers accurately.\n- When inspecting or fixing code, write complete, working code without leaving placeholders. Use `read_file` to inspect exact code and `edit_file` or `write_file` to apply modifications.\n- Full PC & System Capabilities: You have full access to system tools: invoke_subagent, read_file, batch_read_files, write_file, edit_file, delete_file, delete_directory, move_or_rename, copy_file_or_dir, find_files, git_command, compile_project, check_syntax, run_project_tests, clean_build_artifacts, format_code, lint_code, search_code, read_project_skeleton, list_directory, inspect_path, run_command, check_environment_tools, install_software_package, download_file, create_directory, open_browser, open_application, http_fetch, call_mcp_tool, list_mcp_tools, connect_mcp_server, or Roblox Studio MCP whenever needed.\n\n");
+        initial_prompt.push_str("Directives:\n- AUTONOMOUS SYSTEM & PC CONTROL: You have FULL access to the user's Windows PC. Solve tasks proactively, write code, run commands, and execute tools without hesitating or asking permission. You are authorized to manage files, compile code, execute scripts, and operate system tools.\n- TOKEN EFFICIENCY: Read only what you need. When inspecting projects, use `read_project_skeleton` or `batch_read_files` first. Avoid redundant lookups.\n- ACTION-FIRST: Once you locate the target code or files, IMMEDIATELY call `write_file` or `edit_file` to apply fixes. Do not remain stuck in planning or search loops.\n- COMPILATION & DIAGNOSTICS: Always verify changes using `check_syntax` or `compile_project`. Read error outputs and fix line numbers accurately.\n- ELEVATED PRIVILEGES: When modifying system files, services, registry, firewall, or installing software, use `powershell_exec_admin`.\n- MCP TOOLS: You have direct access to connected MCP servers (including Roblox Studio MCP tools like `execute_luau`, `get_studio_state`, `inspect_instance`, `script_search`, etc.). Always pass valid JSON arguments matching their input schemas.\n\n");
         initial_prompt.push_str("<available_tools>\n");
         for t in &tools_json_array {
             let name = t["name"].as_str().unwrap_or("");
-            let mut desc = t["description"].as_str().unwrap_or("").trim().to_string();
-            if let Some(dot_idx) = desc.find('.') {
-                if dot_idx < 70 {
-                    desc.truncate(dot_idx + 1);
-                } else {
-                    desc.truncate(67);
-                    desc.push_str("...");
-                }
-            } else if desc.len() > 70 {
-                desc.truncate(67);
-                desc.push_str("...");
+            let desc = t["description"].as_str().unwrap_or("").trim();
+            let props_summary = t.get("input_schema")
+                .and_then(|s| s.get("properties"))
+                .and_then(|p| p.as_object())
+                .map(|obj| {
+                    let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+                    keys.join(", ")
+                })
+                .unwrap_or_default();
+            if props_summary.is_empty() {
+                initial_prompt.push_str(&format!("- `{}`: {}\n", name, desc));
+            } else {
+                initial_prompt.push_str(&format!("- `{}` ({}): {}\n", name, props_summary, desc));
             }
-            initial_prompt.push_str(&format!("- `{}`: {}\n", name, desc));
         }
         initial_prompt.push_str("</available_tools>\n\n");
         initial_prompt.push_str("To execute tools, output code blocks in this exact format:\n```tool_call\n{\n  \"name\": \"tool_name\",\n  \"arguments\": {\"arg\": \"val\"}\n}\n```\n");
@@ -2268,6 +2339,37 @@ async fn execute_tool(
                 Ok(msg) => (msg, false),
                 Err(e) => (e, true),
             }
+        }
+        "powershell_exec_admin" | "run_command_admin" => {
+            let cmd = args.get("command").or_else(|| args.get("script")).and_then(|c| c.as_str()).unwrap_or("");
+            crate::tools::execute_powershell_admin(cmd)
+        }
+        "get_admin_status" => {
+            crate::tools::get_admin_status()
+        }
+        "get_network_info" => {
+            crate::tools::get_network_info()
+        }
+        "get_disk_usage" => {
+            let path = args.get("path").or_else(|| args.get("folder")).and_then(|p| p.as_str());
+            crate::tools::get_disk_usage(path)
+        }
+        "manage_windows_service" => {
+            let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("status");
+            let name = args.get("service_name").or_else(|| args.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+            crate::tools::manage_windows_service(action, name)
+        }
+        "get_windows_event_log" => {
+            let log = args.get("log_name").or_else(|| args.get("log")).and_then(|l| l.as_str()).unwrap_or("Application");
+            let max = args.get("max_events").or_else(|| args.get("count")).and_then(|m| m.as_u64()).unwrap_or(20) as usize;
+            let level = args.get("level").and_then(|l| l.as_str());
+            crate::tools::get_windows_event_log(log, max, level)
+        }
+        "schedule_task" => {
+            let name = args.get("task_name").or_else(|| args.get("name")).and_then(|n| n.as_str()).unwrap_or("ClaudeTask");
+            let cmd = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            let trigger = args.get("trigger").and_then(|t| t.as_str()).unwrap_or("once");
+            crate::tools::schedule_task(name, cmd, trigger)
         }
         "install_mcp_package" => {
             let pkg = args.get("package").or_else(|| args.get("name")).and_then(|p| p.as_str()).unwrap_or("");

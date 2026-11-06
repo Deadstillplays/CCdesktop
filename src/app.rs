@@ -551,6 +551,72 @@ impl ClaudeDesktopApp {
             just_pressed
         }
     }
+
+    fn spawn_browser_auto_login(
+        tokio_runtime: &tokio::runtime::Runtime,
+        email: Option<String>,
+        tx: crossbeam_channel::Sender<Result<(Option<String>, String, String), String>>,
+    ) {
+        tokio_runtime.spawn(async move {
+            let script_path = dirs::config_dir()
+                .map(|d| d.join("ClaudeDesktopRust").join("scripts").join("auto_login.py"))
+                .unwrap_or_else(|| std::path::PathBuf::from("scripts/auto_login.py"));
+
+            if !script_path.exists() {
+                if let Some(parent) = script_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let embedded = include_str!("../scripts/auto_login.py");
+                let _ = std::fs::write(&script_path, embedded);
+            }
+
+            let mut py_candidates = vec![
+                "python.exe".to_string(),
+                "python".to_string(),
+                "py.exe".to_string(),
+                "py".to_string(),
+            ];
+            if let Some(local) = dirs::data_local_dir() {
+                let py_prog = local.join("Programs").join("Python");
+                if let Ok(entries) = std::fs::read_dir(py_prog) {
+                    for entry in entries.flatten() {
+                        let exe = entry.path().join("python.exe");
+                        if exe.exists() {
+                            py_candidates.insert(0, exe.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+
+            for py in &py_candidates {
+                let mut cmd = std::process::Command::new(py);
+                cmd.arg(&script_path);
+                if let Some(ref em) = email {
+                    cmd.arg(em);
+                }
+                if let Ok(output) = cmd.output() {
+                    if output.status.success() {
+                        let text = String::from_utf8_lossy(&output.stdout);
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(sk) = v.get("sessionKey").and_then(|s| s.as_str()) {
+                                let sk_str = sk.to_string();
+                                match verify_claude_account(&sk_str).await {
+                                    Ok((uuid, name)) => {
+                                        let _ = tx.send(Ok((Some(sk_str), uuid, name)));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(Err(format!("Extracted cookie, but verification failed: {}", e)));
+                                    }
+                                }
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = tx.send(Err("Could not automatically extract session from browser. Ensure a Chromium browser is installed.".to_string()));
+        });
+    }
 }
 
 #[cfg(windows)]
@@ -978,63 +1044,8 @@ impl eframe::App for ClaudeDesktopApp {
                         if chat_action.start_auto_google_login {
                             let tx = self.verify_account_tx.clone();
                             self.settings_view_state.is_verifying_account = true;
-                            self.settings_view_state.toast_message = Some("🌐 Launching browser for Google Login... Please sign in!".to_string());
-                            self.tokio_runtime.spawn(async move {
-                                let script_path = dirs::config_dir()
-                                    .map(|d| d.join("ClaudeDesktopRust").join("scripts").join("auto_login.py"))
-                                    .unwrap_or_else(|| std::path::PathBuf::from("scripts/auto_login.py"));
-
-                                if !script_path.exists() {
-                                    if let Some(parent) = script_path.parent() {
-                                        let _ = std::fs::create_dir_all(parent);
-                                    }
-                                    let embedded = include_str!("../scripts/auto_login.py");
-                                    let _ = std::fs::write(&script_path, embedded);
-                                }
-
-                                let mut py_candidates = vec![
-                                    "python.exe".to_string(),
-                                    "python".to_string(),
-                                    "py.exe".to_string(),
-                                    "py".to_string(),
-                                ];
-                                if let Some(local) = dirs::data_local_dir() {
-                                    let py_prog = local.join("Programs").join("Python");
-                                    if let Ok(entries) = std::fs::read_dir(py_prog) {
-                                        for entry in entries.flatten() {
-                                            let exe = entry.path().join("python.exe");
-                                            if exe.exists() {
-                                                py_candidates.insert(0, exe.to_string_lossy().to_string());
-                                            }
-                                        }
-                                    }
-                                }
-
-                                for py in &py_candidates {
-                                    let mut cmd = std::process::Command::new(py);
-                                    cmd.arg(&script_path);
-                                    if let Ok(output) = cmd.output() {
-                                        if output.status.success() {
-                                            let text = String::from_utf8_lossy(&output.stdout);
-                                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                                                if let Some(sk) = v.get("sessionKey").and_then(|s| s.as_str()) {
-                                                    let sk_str = sk.to_string();
-                                                    match verify_claude_account(&sk_str).await {
-                                                        Ok((uuid, name)) => {
-                                                            let _ = tx.send(Ok((Some(sk_str), uuid, name)));
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = tx.send(Err(format!("Extracted cookie, but verification failed: {}", e)));
-                                                        }
-                                                    }
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                let _ = tx.send(Err("Browser login completed but session cookie was not detected. Please verify or paste manually.".to_string()));
-                            });
+                            self.settings_view_state.toast_message = Some("🌐 Launching Chromium browser... Please sign in!".to_string());
+                            Self::spawn_browser_auto_login(&self.tokio_runtime, None, tx);
                         }
 
                         if chat_action.open_accounts_file {
@@ -1225,11 +1236,17 @@ impl eframe::App for ClaudeDesktopApp {
                                     }
                                 });
                             }
-                            SettingsViewAction::OpenBrowserLogin => {
-                                let _ = open::that("https://claude.ai/login");
+                            SettingsViewAction::OpenBrowserLogin | SettingsViewAction::OpenGoogleLogin => {
+                                let tx = self.verify_account_tx.clone();
+                                self.settings_view_state.is_verifying_account = true;
+                                self.settings_view_state.toast_message = Some("🌐 Launching Chromium browser... Please sign in!".to_string());
+                                Self::spawn_browser_auto_login(&self.tokio_runtime, None, tx);
                             }
-                            SettingsViewAction::OpenGoogleLogin => {
-                                let _ = open::that("https://claude.ai/login");
+                            SettingsViewAction::StartChromiumAutoLogin(email) => {
+                                let tx = self.verify_account_tx.clone();
+                                self.settings_view_state.is_verifying_account = true;
+                                self.settings_view_state.toast_message = Some("🌐 Launching Chromium browser... Please sign in!".to_string());
+                                Self::spawn_browser_auto_login(&self.tokio_runtime, email, tx);
                             }
                             SettingsViewAction::PasteFromClipboard => {
                                 if let Some(text) = crate::ui::clipboard::ClipboardHelper::get_text() {

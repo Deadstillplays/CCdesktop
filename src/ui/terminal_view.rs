@@ -17,8 +17,8 @@ pub struct TerminalViewState {
     pub command_input: String,
     pub output_lines: Vec<TerminalLine>,
     pub history: Vec<String>,
-    #[allow(dead_code)]
     pub history_idx: Option<usize>,
+    pub admin_mode: bool,
     #[allow(dead_code)]
     pub is_running: bool,
 }
@@ -32,7 +32,7 @@ impl Default for TerminalViewState {
 
         let mut lines = Vec::new();
         lines.push(TerminalLine {
-            text: "✦ Antigravity Terminal Console Initialized".to_string(),
+            text: "✦ Antigravity Terminal Console Initialized (Full PC Access)".to_string(),
             is_error: false,
             is_command: false,
             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
@@ -57,6 +57,7 @@ impl Default for TerminalViewState {
             output_lines: lines,
             history: Vec::new(),
             history_idx: None,
+            admin_mode: false,
             is_running: false,
         }
     }
@@ -83,6 +84,19 @@ pub fn render_terminal_view(ui: &mut Ui, state: &mut TerminalViewState) {
                     if ui.small_button("Copy All").clicked() {
                         let all_text = state.output_lines.iter().map(|l| l.text.as_str()).collect::<Vec<&str>>().join("\n");
                         ui.ctx().copy_text(all_text);
+                    }
+
+                    if ui.small_button("Copy Last").clicked() {
+                        if let Some(last) = state.output_lines.last() {
+                            ui.ctx().copy_text(last.text.clone());
+                        }
+                    }
+
+                    // Admin Mode Toggle
+                    let admin_text = if state.admin_mode { "🔐 Admin: ON" } else { "🛡 Admin: OFF" };
+                    let admin_color = if state.admin_mode { RED_STATUS } else { TEXT_MUTED };
+                    if ui.button(RichText::new(admin_text).size(11.5).color(admin_color).strong()).clicked() {
+                        state.admin_mode = !state.admin_mode;
                     }
 
                     // Shell selector
@@ -122,18 +136,23 @@ pub fn render_terminal_view(ui: &mut Ui, state: &mut TerminalViewState) {
         .corner_radius(CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Quick Run:").size(11.0).color(TEXT_MUTED).strong());
 
                 let presets = [
                     ("git status", "git status"),
                     ("cargo check", "cargo check"),
-                    ("dir", "dir"),
-                    ("Roblox Studio Check", "tasklist | findstr /i RobloxStudio"),
-                    ("Roblox MCP Test", "%LOCALAPPDATA%\\Roblox\\mcp.bat"),
-                    ("tasklist", "tasklist"),
+                    ("whoami /all", "whoami /all"),
                     ("ipconfig", "ipconfig"),
-                    ("whoami", "whoami"),
+                    ("netstat -an", "netstat -an"),
+                    ("tasklist", "tasklist"),
+                    ("dir", "dir"),
+                    ("Get-ExecutionPolicy", "Get-ExecutionPolicy"),
+                    ("winget list", "winget list"),
+                    ("wsl --list", "wsl --list"),
+                    ("Services (Running)", "Get-Service | Where-Object { $_.Status -eq 'Running' } | Select-Object -First 25 Name, Status"),
+                    ("Check Admin", "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"),
+                    ("Roblox Studio Check", "tasklist | findstr /i RobloxStudio"),
                 ];
 
                 for (label, cmd_to_run) in presets {
@@ -195,14 +214,48 @@ pub fn render_terminal_view(ui: &mut Ui, state: &mut TerminalViewState) {
         .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let prompt_label = if state.shell == "PowerShell" { "PS >" } else { "CMD >" };
-                ui.label(RichText::new(prompt_label).size(12.0).monospace().color(GREEN_STATUS).strong());
+                let prompt_label = if state.admin_mode {
+                    "🔐 ADMIN >"
+                } else if state.shell == "PowerShell" {
+                    "PS >"
+                } else {
+                    "CMD >"
+                };
+                let prompt_color = if state.admin_mode { RED_STATUS } else { GREEN_STATUS };
+                ui.label(RichText::new(prompt_label).size(12.0).monospace().color(prompt_color).strong());
 
                 let text_edit = TextEdit::singleline(&mut state.command_input)
-                    .hint_text("Enter command (e.g. dir, cargo run, git status)...")
+                    .hint_text(if state.admin_mode { "Enter elevated command (UAC will elevate)..." } else { "Enter command (Up/Down for history)..." })
                     .desired_width(ui.available_width() - 80.0_f32);
 
                 let resp = ui.add(text_edit);
+
+                // Up arrow: previous command
+                if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    if !state.history.is_empty() {
+                        let new_idx = match state.history_idx {
+                            None => state.history.len() - 1,
+                            Some(0) => 0,
+                            Some(i) => i - 1,
+                        };
+                        state.history_idx = Some(new_idx);
+                        state.command_input = state.history[new_idx].clone();
+                    }
+                }
+                // Down arrow: next command
+                if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    if let Some(idx) = state.history_idx {
+                        if idx + 1 < state.history.len() {
+                            let new_idx = idx + 1;
+                            state.history_idx = Some(new_idx);
+                            state.command_input = state.history[new_idx].clone();
+                        } else {
+                            state.history_idx = None;
+                            state.command_input.clear();
+                        }
+                    }
+                }
+
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let run_clicked = ui.button(RichText::new("Run ➤").size(12.0).color(Color32::WHITE).strong()).clicked();
 
@@ -210,6 +263,7 @@ pub fn render_terminal_view(ui: &mut Ui, state: &mut TerminalViewState) {
                     let cmd = state.command_input.trim().to_string();
                     if !cmd.is_empty() {
                         state.command_input.clear();
+                        state.history_idx = None;
                         execute_terminal_command(state, &cmd);
                     }
                 }
@@ -220,8 +274,9 @@ pub fn render_terminal_view(ui: &mut Ui, state: &mut TerminalViewState) {
 pub fn execute_terminal_command(state: &mut TerminalViewState, cmd_str: &str) {
     let now = chrono::Local::now().format("%H:%M:%S").to_string();
 
+    let prefix = if state.admin_mode { "🔐 [ADMIN] > " } else { "> " };
     state.output_lines.push(TerminalLine {
-        text: format!("> {}", cmd_str),
+        text: format!("{}{}", prefix, cmd_str),
         is_error: false,
         is_command: true,
         timestamp: now.clone(),
@@ -231,6 +286,20 @@ pub fn execute_terminal_command(state: &mut TerminalViewState, cmd_str: &str) {
 
     let expanded_dir = crate::mcp::client::expand_vars(&state.working_dir);
     let expanded_cmd = crate::mcp::client::expand_vars(cmd_str);
+
+    if state.admin_mode {
+        // Execute elevated via execute_powershell_admin
+        let (output, is_err) = crate::tools::execute_powershell_admin(&expanded_cmd);
+        for line in output.lines() {
+            state.output_lines.push(TerminalLine {
+                text: strip_ansi(line),
+                is_error: is_err,
+                is_command: false,
+                timestamp: now.clone(),
+            });
+        }
+        return;
+    }
 
     let mut cmd = if state.shell == "PowerShell" {
         let mut c = Command::new("powershell.exe");
@@ -260,7 +329,7 @@ pub fn execute_terminal_command(state: &mut TerminalViewState, cmd_str: &str) {
 
             for line in stdout.lines() {
                 state.output_lines.push(TerminalLine {
-                    text: line.to_string(),
+                    text: strip_ansi(line),
                     is_error: false,
                     is_command: false,
                     timestamp: now.clone(),
@@ -270,7 +339,7 @@ pub fn execute_terminal_command(state: &mut TerminalViewState, cmd_str: &str) {
             if !stderr.is_empty() {
                 for line in stderr.lines() {
                     state.output_lines.push(TerminalLine {
-                        text: line.to_string(),
+                        text: strip_ansi(line),
                         is_error: true,
                         is_command: false,
                         timestamp: now.clone(),
@@ -296,4 +365,33 @@ pub fn execute_terminal_command(state: &mut TerminalViewState, cmd_str: &str) {
             });
         }
     }
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else if chars.peek() == Some(&']') {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc == '\x07' || nc == '\x1b' {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }

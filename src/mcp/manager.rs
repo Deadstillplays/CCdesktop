@@ -1,4 +1,4 @@
-﻿use super::client::McpClientHandle;
+use super::client::McpClientHandle;
 use super::http_client;
 use super::types::*;
 use serde_json::Value;
@@ -293,7 +293,7 @@ impl McpManager {
             }
         }
 
-        let (server_client, http_url, server_name) = {
+        let (server_client, http_url, server_name, server_cfg) = {
             let inner = self.inner.read().await;
             let tool = if let Some(srv) = server_or_url {
                 inner
@@ -306,16 +306,19 @@ impl McpManager {
             };
 
             let tool = tool.ok_or_else(|| {
+                let available_servers: Vec<String> = inner.config.mcp_servers.keys().cloned().collect();
                 format!(
-                    "Tool '{}' not found in connected MCP servers. Use 'list_mcp_tools' to see available tools.",
-                    tool_name
+                    "Tool '{}' not found in connected MCP servers. Available configured servers: [{}]. Use 'list_mcp_tools' or 'connect_mcp_server'.",
+                    tool_name,
+                    available_servers.join(", ")
                 )
             })?;
 
             let s_name = tool.server_name.clone();
             let s_client = inner.servers.get(&s_name).cloned();
             let h_url = inner.http_servers.get(&s_name).cloned();
-            (s_client, h_url, s_name)
+            let s_cfg = inner.config.mcp_servers.get(&s_name).cloned();
+            (s_client, h_url, s_name, s_cfg)
         };
 
         if server_name == "custom_tools" {
@@ -325,13 +328,50 @@ impl McpManager {
         }
 
         if let Some(client) = server_client {
-            client.call_tool(tool_name, arguments).await.map_err(|e| {
-                format!("Error executing tool '{}' on server '{}': {}", tool_name, server_name, e)
-            })
+            match client.call_tool(tool_name, arguments.clone()).await {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    if let Some(cfg) = server_cfg {
+                        if self.connect_server(&server_name, cfg).await.is_ok() {
+                            let retry_client = {
+                                let inner = self.inner.read().await;
+                                inner.servers.get(&server_name).cloned()
+                            };
+                            if let Some(rc) = retry_client {
+                                return rc.call_tool(tool_name, arguments).await.map_err(|e2| {
+                                    format!("Error executing tool '{}' on reconnected server '{}': {}", tool_name, server_name, e2)
+                                });
+                            }
+                        }
+                    }
+                    Err(format!("Error executing tool '{}' on server '{}': {}", tool_name, server_name, e))
+                }
+            }
         } else if let Some(url) = http_url {
-            http_client::call_tool_on_http(&url, tool_name, &arguments).await
+            match http_client::call_tool_on_http(&url, tool_name, &arguments).await {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                    http_client::call_tool_on_http(&url, tool_name, &arguments).await.map_err(|e2| {
+                        format!("HTTP MCP tool '{}' failed (retry error: {}): {}", tool_name, e2, e)
+                    })
+                }
+            }
         } else {
-            Err(format!("Server '{}' is not connected", server_name))
+            if let Some(cfg) = server_cfg {
+                if self.connect_server(&server_name, cfg).await.is_ok() {
+                    let retry_client = {
+                        let inner = self.inner.read().await;
+                        inner.servers.get(&server_name).cloned()
+                    };
+                    if let Some(rc) = retry_client {
+                        return rc.call_tool(tool_name, arguments).await.map_err(|e| {
+                            format!("Error executing tool '{}' on auto-reconnected server '{}': {}", tool_name, server_name, e)
+                        });
+                    }
+                }
+            }
+            Err(format!("Server '{}' is not connected. Attempted auto-reconnect failed.", server_name))
         }
     }
 

@@ -11,6 +11,7 @@ pub struct SettingsViewState {
     pub is_verifying_account: bool,
     pub new_account_name: String,
     pub new_account_key: String,
+    pub auto_login_email: String,
 }
 
 impl Default for SettingsViewState {
@@ -22,6 +23,7 @@ impl Default for SettingsViewState {
             is_verifying_account: false,
             new_account_name: String::new(),
             new_account_key: String::new(),
+            auto_login_email: String::new(),
         }
     }
 }
@@ -30,6 +32,7 @@ pub enum SettingsViewAction {
     AutoSyncClaudeDesktop,
     OpenBrowserLogin,
     OpenGoogleLogin,
+    StartChromiumAutoLogin(Option<String>),
     PasteFromClipboard,
     SwitchAccount(String),
     DeleteAccount(String),
@@ -265,6 +268,34 @@ pub fn render_settings_view(
                                 ui.add_space(10.0);
                                 ui.separator();
                                 ui.add_space(6.0);
+
+                                // Automatic Chromium Browser Login
+                                Frame::new()
+                                    .fill(CARD_BG)
+                                    .corner_radius(CornerRadius::same(6))
+                                    .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
+                                    .inner_margin(egui::Margin::symmetric(12, 10))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("🌐 Automatic Browser Login (Chromium)").size(13.0).color(ACCENT_PEACH).strong());
+                                            ui.label(RichText::new("1-Click Sign-In").size(11.0).color(TEXT_MUTED));
+                                        });
+                                        ui.label(RichText::new("Launches an isolated Chromium tab (Brave, Chrome, Edge) with saved session cache. Log in via Google, Apple, or Email, and your sessionKey is captured automatically!").size(11.0).color(TEXT_SECONDARY));
+                                        ui.add_space(6.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("Email (optional):").size(11.5));
+                                            ui.add(TextEdit::singleline(&mut state.auto_login_email).hint_text("e.g. user@gmail.com").desired_width(180.0_f32));
+
+                                            let btn_text = if state.is_verifying_account { "⏳ Waiting for Login..." } else { "🚀 Launch Browser Login" };
+                                            if ui.add_enabled(!state.is_verifying_account, Button::new(RichText::new(btn_text).size(12.0).color(Color32::WHITE).strong()).fill(ACCENT_PEACH)).clicked() {
+                                                state.is_verifying_account = true;
+                                                let email = if state.auto_login_email.trim().is_empty() { None } else { Some(state.auto_login_email.trim().to_string()) };
+                                                action = Some(SettingsViewAction::StartChromiumAutoLogin(email));
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(8.0);
 
                                 // Add New Account form
                                 ui.label(RichText::new("+ Add Account by Session Key:").size(12.0).strong());

@@ -57,6 +57,10 @@ def read_websocket_frame(sock):
         return None
 
 def main():
+    email_to_autofill = None
+    if len(sys.argv) > 1 and sys.argv[1].strip():
+        email_to_autofill = sys.argv[1].strip()
+
     browser = find_browser()
     if not browser:
         print(json.dumps({"error": "No Chromium browser (Brave, Edge, Chrome) found."}))
@@ -79,14 +83,14 @@ def main():
     ]
     proc = subprocess.Popen(args)
 
-    max_wait_seconds = 180
+    max_wait_seconds = 240
     start_time = time.time()
     found_key = None
     found_org = None
+    email_injected = False
 
     while time.time() - start_time < max_wait_seconds:
-        time.sleep(1.5)
-        # Check if browser is still running
+        time.sleep(1.2)
         if proc.poll() is not None:
             break
 
@@ -120,6 +124,28 @@ def main():
                 s.sendall(req.encode())
                 resp = s.recv(1024)
                 if b'101' in resp:
+                    # If email provided, attempt to inject it into the email input field
+                    if email_to_autofill and not email_injected:
+                        expr = f"""
+                        (function() {{
+                            var inp = document.querySelector('input[type="email"]') || document.querySelector('input[name="email"]') || document.getElementById('email');
+                            if (inp && (!inp.value || inp.value.length === 0)) {{
+                                inp.focus();
+                                inp.value = {json.dumps(email_to_autofill)};
+                                inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                return true;
+                            }}
+                            return false;
+                        }})()
+                        """
+                        eval_cmd = json.dumps({'id': 100, 'method': 'Runtime.evaluate', 'params': {'expression': expr}})
+                        s.sendall(get_websocket_frame(eval_cmd))
+                        eval_reply = read_websocket_frame(s)
+                        if eval_reply and '"value":true' in eval_reply:
+                            email_injected = True
+
+                    # Query cookies for sessionKey
                     cmd = json.dumps({'id': 1, 'method': 'Network.getCookies', 'params': {'urls': ['https://claude.ai']}})
                     s.sendall(get_websocket_frame(cmd))
                     reply = read_websocket_frame(s)

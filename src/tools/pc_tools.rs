@@ -1,4 +1,5 @@
 use crate::ui::clipboard::ClipboardHelper;
+use chrono::Timelike;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -555,4 +556,164 @@ pub fn auto_install_mcp_package(package: &str, server_name: &str, target_type: &
         ),
         false,
     )
+}
+
+/// Run PowerShell command with admin elevation via Start-Process -Verb RunAs.
+/// Captures output to a temporary file.
+pub fn execute_powershell_admin(command: &str) -> (String, bool) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let out_file = std::env::temp_dir().join(format!("admin_out_{}.txt", ts));
+    let err_file = std::env::temp_dir().join(format!("admin_err_{}.txt", ts));
+
+    let out_path = out_file.display().to_string().replace('\\', "\\\\");
+    let err_path = err_file.display().to_string().replace('\\', "\\\\");
+
+    // Script runs elevated, captures output and error streams
+    let wrapped = format!(
+        "try {{ $o = ({}) 2>&1 | Out-String; [IO.File]::WriteAllText('{}', $o) }} catch {{ [IO.File]::WriteAllText('{}', $_.ToString()) }}",
+        command, out_path, err_path
+    );
+    let encoded = {
+        let utf16: Vec<u16> = wrapped.encode_utf16().collect();
+        let bytes: Vec<u8> = utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
+        base64_encode(&bytes)
+    };
+
+    let ps_launcher = format!(
+        "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile -NonInteractive -EncodedCommand {}'",
+        encoded
+    );
+
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_launcher]);
+
+    match cmd.output() {
+        Ok(_) => {
+            let stdout = fs::read_to_string(&out_file).unwrap_or_default();
+            let stderr = fs::read_to_string(&err_file).unwrap_or_default();
+            let _ = fs::remove_file(&out_file);
+            let _ = fs::remove_file(&err_file);
+
+            if stdout.trim().is_empty() && stderr.trim().is_empty() {
+                ("Admin command executed (UAC prompt completed). No stdout captured — command may have had no output or UAC was dismissed.".to_string(), false)
+            } else if !stderr.trim().is_empty() {
+                (format!("Admin Error:\n{}", stderr.trim()), true)
+            } else {
+                (stdout, false)
+            }
+        }
+        Err(e) => (format!("Failed to spawn elevated PowerShell: {}", e), true),
+    }
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    let mut i = 0;
+    while i < data.len() {
+        let b0 = data[i] as u32;
+        let b1 = if i + 1 < data.len() { data[i + 1] as u32 } else { 0 };
+        let b2 = if i + 2 < data.len() { data[i + 2] as u32 } else { 0 };
+
+        result.push(CHARS[((b0 >> 2) & 0x3F) as usize] as char);
+        result.push(CHARS[(((b0 & 0x3) << 4) | (b1 >> 4)) as usize] as char);
+        result.push(if i + 1 < data.len() { CHARS[(((b1 & 0xF) << 2) | (b2 >> 6)) as usize] as char } else { '=' });
+        result.push(if i + 2 < data.len() { CHARS[(b2 & 0x3F) as usize] as char } else { '=' });
+        i += 3;
+    }
+    result
+}
+
+pub fn get_admin_status() -> (String, bool) {
+    let ps = "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Write-Output 'ELEVATED: Yes - Running as Administrator' } else { Write-Output 'ELEVATED: No - Standard User (not elevated)' }; $id = [Security.Principal.WindowsIdentity]::GetCurrent(); Write-Output \"User: $($id.Name)\"; Write-Output \"SID: $($id.User.Value)\"";
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-Command", ps]);
+    match cmd.output() {
+        Ok(out) => {
+            let res = String::from_utf8_lossy(&out.stdout).to_string();
+            (res, false)
+        }
+        Err(e) => (format!("Failed to check admin status: {}", e), true),
+    }
+}
+
+pub fn get_network_info() -> (String, bool) {
+    let ps = "Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { $a = $_; $ip = Get-NetIPAddress -InterfaceIndex $a.ifIndex -ErrorAction SilentlyContinue | Where-Object { $_.AddressFamily -eq 'IPv4' }; Write-Output \"Adapter: $($a.Name) | Status: $($a.Status) | Speed: $([math]::Round($a.LinkSpeed/1MB,0)) Mbps\"; foreach ($i in $ip) { Write-Output \" IP: $($i.IPAddress)/$($i.PrefixLength)\" } }; Write-Output ''; $dns = Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.ServerAddresses } | Select-Object -First 1; Write-Output \"DNS Servers: $($dns.ServerAddresses -join ', ')\"";
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-Command", ps]);
+    match cmd.output() {
+        Ok(out) => (String::from_utf8_lossy(&out.stdout).to_string(), false),
+        Err(e) => (format!("Failed to get network info: {}", e), true),
+    }
+}
+
+pub fn get_disk_usage(path: Option<&str>) -> (String, bool) {
+    let ps = if let Some(p) = path {
+        format!(
+            "$drives = Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{{N='UsedGB';E={{[math]::Round($_.Used/1GB,2)}}}}, @{{N='FreeGB';E={{[math]::Round($_.Free/1GB,2)}}}}, @{{N='TotalGB';E={{[math]::Round(($_.Used+$_.Free)/1GB,2)}}}} | Format-Table | Out-String; Write-Output $drives; $f = Get-Item '{}' -ErrorAction SilentlyContinue; if ($f -and $f.PSIsContainer) {{ $size = (Get-ChildItem '{}' -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum; Write-Output \"Folder '{}' size: $([math]::Round($size/1MB,1)) MB\" }}",
+            p, p, p
+        )
+    } else {
+        "Get-PSDrive -PSProvider FileSystem | Select-Object Name, Root, @{N='UsedGB';E={[math]::Round($_.Used/1GB,2)}}, @{N='FreeGB';E={[math]::Round($_.Free/1GB,2)}}, @{N='TotalGB';E={[math]::Round(($_.Used+$_.Free)/1GB,2)}} | Format-Table | Out-String".to_string()
+    };
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-Command", &ps]);
+    match cmd.output() {
+        Ok(out) => (String::from_utf8_lossy(&out.stdout).to_string(), false),
+        Err(e) => (format!("Failed to get disk usage: {}", e), true),
+    }
+}
+
+pub fn manage_windows_service(action: &str, service_name: &str) -> (String, bool) {
+    let ps = match action.to_lowercase().as_str() {
+        "start" => format!("Start-Service -Name '{}' -ErrorAction Stop; Write-Output \"Service '{}' started successfully.\"", service_name, service_name),
+        "stop"  => format!("Stop-Service -Name '{}' -Force -ErrorAction Stop; Write-Output \"Service '{}' stopped successfully.\"", service_name, service_name),
+        "restart" => format!("Restart-Service -Name '{}' -Force -ErrorAction Stop; Write-Output \"Service '{}' restarted successfully.\"", service_name, service_name),
+        "status" => format!("$s = Get-Service -Name '{}' -ErrorAction SilentlyContinue; if ($s) {{ \"Service: $($s.Name)`nDisplayName: $($s.DisplayName)`nStatus: $($s.Status)`nStartType: $($s.StartType)\" }} else {{ Write-Error \"Service '{}' not found\" }}", service_name, service_name),
+        "list"   => "Get-Service | Select-Object Name, Status, StartType | Sort-Object Status, Name | Format-Table | Out-String -Width 120".to_string(),
+        _ => return (format!("Unknown action '{}'. Use: start, stop, restart, status, list", action), true),
+    };
+    let (out, is_err) = execute_powershell(&ps, None, 30);
+    (out, is_err)
+}
+
+pub fn get_windows_event_log(log_name: &str, max_events: usize, level: Option<&str>) -> (String, bool) {
+    let level_filter = match level.unwrap_or("all").to_lowercase().as_str() {
+        "error" => " | Where-Object { $_.Level -le 2 }",
+        "warning" => " | Where-Object { $_.Level -le 3 }",
+        _ => "",
+    };
+    let ps = format!(
+        "Get-WinEvent -LogName '{}' -MaxEvents {} -ErrorAction SilentlyContinue{} | Select-Object TimeCreated, LevelDisplayName, Id, Message | ForEach-Object {{ Write-Output \"[$($_.TimeCreated)] [$($_.LevelDisplayName)] ID=$($_.Id): $($_.Message -replace '`n',' ' | Select-Object -First 1)\" }} | Out-String -Width 200",
+        log_name, max_events, level_filter
+    );
+    let (out, is_err) = execute_powershell(&ps, None, 30);
+    if out.trim().is_empty() {
+        (format!("No events found in log '{}'.", log_name), false)
+    } else {
+        (out, is_err)
+    }
+}
+
+pub fn schedule_task(task_name: &str, command: &str, trigger: &str) -> (String, bool) {
+    let trigger_arg = if trigger.starts_with("daily") {
+        let time = trigger.trim_start_matches("daily").trim();
+        format!("/SC DAILY /ST {}", if time.is_empty() { "09:00" } else { time })
+    } else if trigger == "onstart" {
+        "/SC ONSTART".to_string()
+    } else if trigger == "onlogon" {
+        "/SC ONLOGON".to_string()
+    } else {
+        let now = chrono::Local::now();
+        format!("/SC ONCE /ST {}:{:02}", now.format("%H"), (now.minute() + 1) % 60)
+    };
+
+    let full_cmd = format!(
+        "schtasks /Create /TN \"{}\" /TR \"{}\" {} /F",
+        task_name, command, trigger_arg
+    );
+    execute_cmd(&full_cmd, None)
 }
