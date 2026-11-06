@@ -56,6 +56,7 @@ pub struct ChatViewAction {
     pub quote_message: Option<String>,
     pub quick_add_clipboard_account: bool,
     pub start_auto_google_login: bool,
+    pub relogin_account: Option<(String, Option<String>)>,
     pub reload_accounts: bool,
     pub open_accounts_file: bool,
     pub export_chat_md: bool,
@@ -95,111 +96,181 @@ pub fn render_chat_view(
         quote_message: None,
         quick_add_clipboard_account: false,
         start_auto_google_login: false,
+        relogin_account: None,
         reload_accounts: false,
         open_accounts_file: false,
         export_chat_md: false,
         rename_chat: None,
     };
 
-    // Chat Top Header Bar
+    // Chat Top Header Bar - Spacious Two-Row Responsive Layout
     Frame::new()
         .fill(PANEL_BG)
         .corner_radius(CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(14, 8))
         .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
         .show(ui, |ui| {
+            // Row 1: Conversation Title (left) & Account / Model Selectors (right)
             ui.horizontal(|ui| {
-                // Clean conversation title display (safely bounded to prevent overlapping controls)
-                let avail_w = ui.available_width();
-                let is_compact = avail_w < 920.0;
-                let max_chars = if is_compact { 18 } else { 32 };
                 let raw_title = chat.title.trim();
                 let display_title = if raw_title.is_empty() {
                     "New Conversation".to_string()
-                } else if raw_title.len() > max_chars {
-                    format!("{}...", &raw_title[..max_chars])
+                } else if raw_title.len() > 38 {
+                    format!("{}...", &raw_title[..36])
                 } else {
                     raw_title.to_string()
                 };
 
-                let title_box_w = if is_compact { 110.0 } else { 160.0 };
-                ui.add_sized(
-                    [title_box_w, 22.0],
-                    egui::Label::new(
-                        RichText::new(&display_title)
-                            .size(14.0)
-                            .color(TEXT_PRIMARY)
-                            .strong(),
-                    )
-                    .truncate(),
+                ui.label(
+                    RichText::new(&display_title)
+                        .size(13.5)
+                        .color(TEXT_PRIMARY)
+                        .strong(),
                 );
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button(RichText::new("🗑 Clear").size(11.5)).clicked() {
-                        action.clear_chat = true;
-                    }
-
-                    if ui.button(RichText::new("📤 Export MD").size(11.5).color(TEXT_SECONDARY)).clicked() {
-                        action.export_chat_md = true;
-                    }
-
-                    // Search toggle (Ctrl+F)
-                    let search_color = if ui_state.show_search_bar { ACCENT_PEACH } else { TEXT_SECONDARY };
-                    if ui.button(RichText::new("🔍 Search").size(11.5).color(search_color)).clicked() {
-                        ui_state.show_search_bar = !ui_state.show_search_bar;
-                        if !ui_state.show_search_bar { ui_state.search_query.clear(); }
-                    }
-                    if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F)) {
-                        ui_state.show_search_bar = !ui_state.show_search_bar;
-                        if !ui_state.show_search_bar { ui_state.search_query.clear(); }
-                    }
-
-                    // Token estimate pill
-                    let total_chars: usize = chat.messages.iter().map(|m| m.content.len()).sum();
-                    let est_tokens = (total_chars / 4).max(0);
-                    let (tok_color, tok_label) = if est_tokens > 150_000 {
-                        (Color32::from_rgb(248, 113, 113), format!("~{}k tok ⚠", est_tokens / 1000))
-                    } else if est_tokens > 50_000 {
-                        (Color32::from_rgb(251, 191, 36), format!("~{}k tok", est_tokens / 1000))
-                    } else if est_tokens >= 1000 {
-                        (GREEN_STATUS, format!("~{:.1}k tok", est_tokens as f32 / 1000.0))
-                    } else if est_tokens > 0 {
-                        (GREEN_STATUS, format!("~{} tok", est_tokens))
+                    // Interactive Account Switcher Menu Button (Rightmost)
+                    let active_acc_name = config
+                        .get_active_account()
+                        .map(|a| a.name.as_str())
+                        .unwrap_or(if config.claude_user_name.is_empty() { "No Account" } else { &config.claude_user_name });
+                    let (ready_cnt, limited_cnt) = config.pool_stats();
+                    let total_msgs = config.total_pool_messages();
+                    let short_active_name = if active_acc_name.len() > 18 {
+                        format!("{}...", &active_acc_name[..16])
                     } else {
-                        (TEXT_MUTED, "empty".to_string())
+                        active_acc_name.to_string()
                     };
-                    Frame::new()
-                        .fill(CARD_BG)
-                        .corner_radius(CornerRadius::same(4))
-                        .inner_margin(egui::Margin::symmetric(6, 2))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(tok_label).size(10.5).color(tok_color).strong());
-                        });
-
-                    if ui.button(RichText::new(">_ Terminal").size(11.5).color(TEXT_SECONDARY)).clicked() {
-                        action.open_terminal = true;
-                    }
-
-                    // Drawer toggle button
-                    let drawer_label = if ui_state.show_storage_drawer {
-                        "📄 Hide Storage"
+                    let button_text = if config.combined_usage && config.accounts.len() > 1 {
+                        format!("👤 {}  🔀 Pool ({}/{}) ▼", short_active_name, ready_cnt, config.accounts.len())
                     } else {
-                        "📄 Storage & Artifacts"
+                        format!("👤 {} ▼", short_active_name)
                     };
-                    if ui
-                        .button(
-                            RichText::new(drawer_label)
-                                .size(11.5)
-                                .color(if ui_state.show_storage_drawer {
-                                    ACCENT_PEACH
-                                } else {
-                                    TEXT_SECONDARY
-                                }),
-                        )
-                        .clicked()
-                    {
-                        ui_state.show_storage_drawer = !ui_state.show_storage_drawer;
-                    }
+                    ui.menu_button(
+                        RichText::new(button_text)
+                            .size(11.5)
+                            .color(if config.combined_usage && config.accounts.len() > 1 { ACCENT_PEACH } else { TEXT_PRIMARY }),
+                        |ui| {
+                            ui.label(RichText::new("COMBINED USAGE POOL").size(10.5).color(TEXT_MUTED).strong());
+                            ui.label(
+                                RichText::new(format!("📊 Usage: {} total msgs across {} account(s)", total_msgs, config.accounts.len()))
+                                    .size(10.5)
+                                    .color(TEXT_SECONDARY),
+                            );
+                            if limited_cnt > 0 {
+                                ui.label(
+                                    RichText::new(format!("⚠ {} account(s) cooling down", limited_cnt))
+                                        .size(10.5)
+                                        .color(RED_STATUS),
+                                );
+                            }
+
+                            let mut pool_active = config.combined_usage;
+                            let pool_color = if pool_active { ACCENT_PEACH } else { TEXT_PRIMARY };
+                            if ui.checkbox(
+                                &mut pool_active,
+                                RichText::new("🔀 Auto-switch on rate limit")
+                                    .size(11.5)
+                                    .color(pool_color),
+                            ).changed() {
+                                action.toggle_combined_usage = Some(pool_active);
+                            }
+                            ui.separator();
+
+                            ui.label(RichText::new("SWITCH ACCOUNT (ISOLATED PROFILES)").size(10.5).color(TEXT_MUTED).strong());
+                            ui.separator();
+
+                            if config.accounts.is_empty() {
+                                ui.label(RichText::new("No extra accounts added").size(11.0).color(TEXT_MUTED));
+                            } else {
+                                ScrollArea::vertical()
+                                    .max_height(280.0_f32)
+                                    .show(ui, |ui| {
+                                        for acc in &config.accounts {
+                                            let is_active = acc.is_active;
+                                            let is_expired = acc.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid") || s.contains("403")).unwrap_or(false);
+                                            let is_limited = acc.is_rate_limited && !is_expired;
+
+                                            let display_name = if acc.name.len() > 30 {
+                                                format!("{}...", &acc.name[..28])
+                                            } else {
+                                                acc.name.clone()
+                                            };
+
+                                            let (badge, text_color) = if is_expired {
+                                                (" [❌ Expired]", Color32::from_rgb(235, 80, 80))
+                                            } else if is_limited {
+                                                (" [⏳ Limited]", Color32::from_rgb(240, 180, 50))
+                                            } else if is_active {
+                                                (" [✓ Active]", ACCENT_PEACH)
+                                            } else {
+                                                ("", TEXT_PRIMARY)
+                                            };
+
+                                            let prefix = if is_active { "●" } else { "○" };
+                                            let label = format!("{} {} ({} msgs){}", prefix, display_name, acc.messages_sent, badge);
+
+                                            ui.horizontal(|ui| {
+                                                if ui
+                                                    .selectable_label(
+                                                        is_active,
+                                                        RichText::new(label).size(11.5).color(text_color),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    action.switch_account = Some(acc.id.clone());
+                                                    ui.close_menu();
+                                                }
+
+                                                if is_expired {
+                                                    if ui.small_button(RichText::new("🔑 Re-Login").size(10.5).color(Color32::WHITE).strong()).clicked() {
+                                                        action.relogin_account = Some((acc.id.clone(), acc.extract_email()));
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    });
+                            }
+
+                            ui.separator();
+                            ui.label(RichText::new("QUICK LOGIN & ADD").size(10.5).color(TEXT_MUTED).strong());
+
+                            if ui.button(RichText::new("🌐 Auto-Login New Account (Chromium)").size(11.5).color(ACCENT_PEACH).strong()).clicked() {
+                                action.start_auto_google_login = true;
+                                ui.close_menu();
+                            }
+
+                            if ui.button(RichText::new("🔑 Open claude.ai/login (Browser)").size(11.5)).clicked() {
+                                let _ = open::that("https://claude.ai/login");
+                                ui.close_menu();
+                            }
+
+                            if ui.button(RichText::new("📋 Quick Paste Key from Clipboard").size(11.5)).clicked() {
+                                action.quick_add_clipboard_account = true;
+                                ui.close_menu();
+                            }
+
+                            ui.separator();
+                            ui.label(RichText::new("ACCOUNTS FILE (accounts.json)").size(10.5).color(TEXT_MUTED).strong());
+
+                            if ui.button(RichText::new("📁 Open accounts.json in Editor").size(11.5)).clicked() {
+                                action.open_accounts_file = true;
+                                ui.close_menu();
+                            }
+
+                            if ui.button(RichText::new("🔄 Reload accounts.json").size(11.5)).clicked() {
+                                action.reload_accounts = true;
+                                ui.close_menu();
+                            }
+
+                            ui.separator();
+                            if ui.button(RichText::new("⚙ Manage Accounts & Profiles in Settings").size(11.5)).clicked() {
+                                action.open_settings = true;
+                                ui.close_menu();
+                            }
+                        },
+                    );
 
                     // Interactive Model Selector Menu Button
                     ui.menu_button(
@@ -247,149 +318,79 @@ pub fn render_chat_view(
                             });
                         },
                     );
+                });
+            });
 
-                    // Interactive Account Switcher Menu Button
-                    let active_acc_name = config
-                        .get_active_account()
-                        .map(|a| a.name.as_str())
-                        .unwrap_or(if config.claude_user_name.is_empty() { "No Account" } else { &config.claude_user_name });
-                    let (ready_cnt, limited_cnt) = config.pool_stats();
-                    let total_msgs = config.total_pool_messages();
-                    let short_active_name = if active_acc_name.len() > 16 {
-                        format!("{}...", &active_acc_name[..14])
+            ui.add_space(4.0);
+
+            // Row 2: Token Pill & Search (left) & Utility Action Buttons (right)
+            ui.horizontal(|ui| {
+                // Token estimate pill
+                let total_chars: usize = chat.messages.iter().map(|m| m.content.len()).sum();
+                let est_tokens = (total_chars / 4).max(0);
+                let (tok_color, tok_label) = if est_tokens > 150_000 {
+                    (Color32::from_rgb(248, 113, 113), format!("~{}k tok ⚠", est_tokens / 1000))
+                } else if est_tokens > 50_000 {
+                    (Color32::from_rgb(251, 191, 36), format!("~{}k tok", est_tokens / 1000))
+                } else if est_tokens >= 1000 {
+                    (GREEN_STATUS, format!("~{:.1}k tok", est_tokens as f32 / 1000.0))
+                } else if est_tokens > 0 {
+                    (GREEN_STATUS, format!("~{} tok", est_tokens))
+                } else {
+                    (TEXT_MUTED, "empty".to_string())
+                };
+                Frame::new()
+                    .fill(CARD_BG)
+                    .corner_radius(CornerRadius::same(4))
+                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(tok_label).size(10.5).color(tok_color).strong());
+                    });
+
+                // Search toggle (Ctrl+F)
+                let search_color = if ui_state.show_search_bar { ACCENT_PEACH } else { TEXT_SECONDARY };
+                if ui.button(RichText::new("🔍 Search").size(11.5).color(search_color)).clicked() {
+                    ui_state.show_search_bar = !ui_state.show_search_bar;
+                    if !ui_state.show_search_bar { ui_state.search_query.clear(); }
+                }
+                if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F)) {
+                    ui_state.show_search_bar = !ui_state.show_search_bar;
+                    if !ui_state.show_search_bar { ui_state.search_query.clear(); }
+                }
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.small_button(RichText::new("🗑 Clear").size(11.5)).clicked() {
+                        action.clear_chat = true;
+                    }
+
+                    if ui.button(RichText::new("📤 Export MD").size(11.5).color(TEXT_SECONDARY)).clicked() {
+                        action.export_chat_md = true;
+                    }
+
+                    // Drawer toggle button
+                    let drawer_label = if ui_state.show_storage_drawer {
+                        "📄 Hide Storage"
                     } else {
-                        active_acc_name.to_string()
+                        "📄 Storage & Artifacts"
                     };
-                    let button_text = if config.combined_usage && config.accounts.len() > 1 {
-                        format!("👤 {}  🔀 Pool ({}/{}) ▼", short_active_name, ready_cnt, config.accounts.len())
-                    } else {
-                        format!("👤 {} ▼", short_active_name)
-                    };
-                    ui.menu_button(
-                        RichText::new(button_text)
-                            .size(11.5)
-                            .color(if config.combined_usage && config.accounts.len() > 1 { ACCENT_PEACH } else { TEXT_PRIMARY }),
-                        |ui| {
-                            ui.label(RichText::new("COMBINED USAGE POOL").size(10.5).color(TEXT_MUTED).strong());
-                            ui.label(
-                                RichText::new(format!("📊 Usage: {} total msgs across {} account(s)", total_msgs, config.accounts.len()))
-                                    .size(10.5)
-                                    .color(TEXT_SECONDARY),
-                            );
-                            if limited_cnt > 0 {
-                                ui.label(
-                                    RichText::new(format!("⚠ {} account(s) cooling down", limited_cnt))
-                                        .size(10.5)
-                                        .color(RED_STATUS),
-                                );
-                            }
+                    if ui
+                        .button(
+                            RichText::new(drawer_label)
+                                .size(11.5)
+                                .color(if ui_state.show_storage_drawer {
+                                    ACCENT_PEACH
+                                } else {
+                                    TEXT_SECONDARY
+                                }),
+                        )
+                        .clicked()
+                    {
+                        ui_state.show_storage_drawer = !ui_state.show_storage_drawer;
+                    }
 
-                            let mut pool_active = config.combined_usage;
-                            let pool_color = if pool_active { ACCENT_PEACH } else { TEXT_PRIMARY };
-                            if ui.checkbox(
-                                &mut pool_active,
-                                RichText::new("🔀 Auto-switch on rate limit")
-                                    .size(11.5)
-                                    .color(pool_color),
-                            ).changed() {
-                                action.toggle_combined_usage = Some(pool_active);
-                            }
-                            ui.separator();
-
-                            ui.label(RichText::new("SWITCH ACCOUNT").size(10.5).color(TEXT_MUTED).strong());
-                            ui.separator();
-
-                            if config.accounts.is_empty() {
-                                ui.label(RichText::new("No extra accounts added").size(11.0).color(TEXT_MUTED));
-                            } else {
-                                ScrollArea::vertical()
-                                    .max_height(280.0_f32)
-                                    .show(ui, |ui| {
-                                        for acc in &config.accounts {
-                                            let is_active = acc.is_active;
-                                            let is_expired = acc.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid") || s.contains("403")).unwrap_or(false);
-                                            let is_limited = acc.is_rate_limited && !is_expired;
-
-                                            let display_name = if acc.name.len() > 30 {
-                                                format!("{}...", &acc.name[..28])
-                                            } else {
-                                                acc.name.clone()
-                                            };
-
-                                            let (badge, text_color) = if is_expired {
-                                                (" [❌ Expired]", Color32::from_rgb(235, 80, 80))
-                                            } else if is_limited {
-                                                (" [⏳ Limited]", Color32::from_rgb(240, 180, 50))
-                                            } else if is_active {
-                                                (" [✓ Active]", ACCENT_PEACH)
-                                            } else {
-                                                ("", TEXT_PRIMARY)
-                                            };
-
-                                            let prefix = if is_active { "●" } else { "○" };
-                                            let label = format!("{} {} ({} msgs){}", prefix, display_name, acc.messages_sent, badge);
-
-                                            ui.horizontal(|ui| {
-                                                if ui
-                                                    .selectable_label(
-                                                        is_active,
-                                                        RichText::new(label).size(11.5).color(text_color),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    action.switch_account = Some(acc.id.clone());
-                                                    ui.close_menu();
-                                                }
-
-                                                if is_expired {
-                                                    if ui.small_button(RichText::new("🔑 Re-Login").size(10.5).color(Color32::WHITE).strong()).clicked() {
-                                                        action.start_auto_google_login = true;
-                                                        ui.close_menu();
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    });
-                            }
-
-                            ui.separator();
-                            ui.label(RichText::new("QUICK LOGIN & ADD").size(10.5).color(TEXT_MUTED).strong());
-
-                            if ui.button(RichText::new("🌐 Auto-Login with Google (1-Click)").size(11.5).color(ACCENT_PEACH).strong()).clicked() {
-                                action.start_auto_google_login = true;
-                                ui.close_menu();
-                            }
-
-                            if ui.button(RichText::new("🔑 Open claude.ai/login (Browser)").size(11.5)).clicked() {
-                                let _ = open::that("https://claude.ai/login");
-                                ui.close_menu();
-                            }
-
-                            if ui.button(RichText::new("📋 Quick Paste Key from Clipboard").size(11.5)).clicked() {
-                                action.quick_add_clipboard_account = true;
-                                ui.close_menu();
-                            }
-
-                            ui.separator();
-                            ui.label(RichText::new("ACCOUNTS FILE (accounts.json)").size(10.5).color(TEXT_MUTED).strong());
-
-                            if ui.button(RichText::new("📁 Open accounts.json in Editor").size(11.5)).clicked() {
-                                action.open_accounts_file = true;
-                                ui.close_menu();
-                            }
-
-                            if ui.button(RichText::new("🔄 Reload accounts.json").size(11.5)).clicked() {
-                                action.reload_accounts = true;
-                                ui.close_menu();
-                            }
-
-                            ui.separator();
-                            if ui.button(RichText::new("⚙ Manage Accounts in Settings").size(11.5)).clicked() {
-                                action.open_settings = true;
-                                ui.close_menu();
-                            }
-                        },
-                    );
+                    if ui.button(RichText::new(">_ Terminal").size(11.5).color(TEXT_SECONDARY)).clicked() {
+                        action.open_terminal = true;
+                    }
                 });
             });
         });
@@ -640,10 +641,10 @@ fn render_messages_and_input(
                     if search_active && !is_match {
                         // Dim non-matching messages
                         ui.set_opacity(0.35);
-                        render_single_message(ui, msg, action);
+                        render_single_message(ui, msg, config, action);
                         ui.set_opacity(1.0);
                     } else {
-                        render_single_message(ui, msg, action);
+                        render_single_message(ui, msg, config, action);
                     }
                 }
             }
@@ -1219,7 +1220,7 @@ pub fn extract_selectable_options(text: &str) -> Vec<String> {
     options
 }
 
-fn render_single_message(ui: &mut Ui, msg: &ChatMessage, action: &mut ChatViewAction) {
+fn render_single_message(ui: &mut Ui, msg: &ChatMessage, config: &AppConfig, action: &mut ChatViewAction) {
     let is_user = msg.role == "user";
 
     let (bg_color, stroke_color, role_label, role_color) = if is_user {
@@ -1386,6 +1387,11 @@ fn render_single_message(ui: &mut Ui, msg: &ChatMessage, action: &mut ChatViewAc
                 let is_session_expired = msg.content.contains("account_session_invalid")
                     || (msg.content.contains("403") && msg.content.contains("expired"));
                 if is_session_expired {
+                    // Extract which account expired
+                    let target_acc = config.accounts.iter().find(|a| {
+                        msg.content.contains(&a.name) || (!a.org_uuid.is_empty() && msg.content.contains(&a.org_uuid))
+                    }).or_else(|| config.get_active_account());
+
                     ui.add_space(8.0_f32);
                     Frame::new()
                         .fill(Color32::from_rgb(42, 18, 18))
@@ -1395,17 +1401,27 @@ fn render_single_message(ui: &mut Ui, msg: &ChatMessage, action: &mut ChatViewAc
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("🔑 Session Expired / Invalid Account").size(13.0).color(Color32::from_rgb(255, 110, 110)).strong());
+                                if let Some(acc) = target_acc {
+                                    ui.label(RichText::new(format!("• {}", acc.name)).size(12.0).color(TEXT_PRIMARY).strong());
+                                }
                             });
-                            ui.label(RichText::new("The session key for this account has expired on Claude.ai. Sign in again to refresh credentials:").size(11.5).color(TEXT_SECONDARY));
+                            ui.label(RichText::new("Each account has an isolated browser profile with saved cookies and cache. Re-login to refresh credentials without affecting any other account:").size(11.5).color(TEXT_SECONDARY));
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
-                                if ui.add(egui::Button::new(RichText::new("🌐 Launch Browser Login (Chromium)").size(11.5).color(Color32::WHITE).strong()).fill(ACCENT_PEACH)).clicked() {
-                                    action.start_auto_google_login = true;
+                                if let Some(acc) = target_acc {
+                                    let btn_label = format!("🌐 Re-Login Profile: {}", acc.slug());
+                                    if ui.add(egui::Button::new(RichText::new(btn_label).size(11.5).color(Color32::WHITE).strong()).fill(ACCENT_PEACH)).clicked() {
+                                        action.relogin_account = Some((acc.id.clone(), acc.extract_email()));
+                                    }
+                                } else {
+                                    if ui.add(egui::Button::new(RichText::new("🌐 Launch Browser Login (Chromium)").size(11.5).color(Color32::WHITE).strong()).fill(ACCENT_PEACH)).clicked() {
+                                        action.start_auto_google_login = true;
+                                    }
                                 }
-                                if ui.button(RichText::new("📋 Paste New Key from Clipboard").size(11.5)).clicked() {
+                                if ui.button(RichText::new("📋 Paste Key from Clipboard").size(11.5)).clicked() {
                                     action.quick_add_clipboard_account = true;
                                 }
-                                if ui.button(RichText::new("⚙ Manage Accounts in Settings").size(11.5)).clicked() {
+                                if ui.button(RichText::new("⚙ Manage Accounts & Profiles").size(11.5)).clicked() {
                                     action.open_settings = true;
                                 }
                             });

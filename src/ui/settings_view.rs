@@ -32,7 +32,12 @@ pub enum SettingsViewAction {
     AutoSyncClaudeDesktop,
     OpenBrowserLogin,
     OpenGoogleLogin,
-    StartChromiumAutoLogin(Option<String>),
+    StartChromiumAutoLogin {
+        target_account_id: Option<String>,
+        email: Option<String>,
+        profile_slug: Option<String>,
+        clear_cache: bool,
+    },
     PasteFromClipboard,
     SwitchAccount(String),
     DeleteAccount(String),
@@ -43,6 +48,7 @@ pub enum SettingsViewAction {
     ValidateAllAccounts,
     ResetAllLimits,
     RemoveExpiredAccounts,
+    OpenProfileFolder(String),
 }
 
 pub fn render_settings_view(
@@ -239,13 +245,25 @@ pub fn render_settings_view(
                                                             // Status badge
                                                             if is_expired {
                                                                 ui.label(RichText::new("❌ Expired (403)").size(11.0).color(Color32::from_rgb(235, 80, 80)).strong());
-                                                                if ui.small_button(RichText::new("🔑 Re-Login").size(10.5).color(Color32::WHITE)).clicked() {
-                                                                    action = Some(SettingsViewAction::StartChromiumAutoLogin(Some(acc.name.clone())));
-                                                                }
                                                             } else if is_limited {
                                                                 ui.label(RichText::new("⏳ Limited").size(11.0).color(Color32::from_rgb(240, 180, 50)));
                                                             } else {
                                                                 ui.label(RichText::new("✓ Ready").size(11.0).color(GREEN_STATUS));
+                                                            }
+
+                                                            // Dedicated Profile & Re-Login Controls
+                                                            let btn_txt = if is_expired { "🔑 Re-Login" } else { "🔑 Refresh" };
+                                                            if ui.small_button(RichText::new(btn_txt).size(10.5).color(Color32::WHITE)).on_hover_text("Open Chromium with this account's isolated cookies & cache").clicked() {
+                                                                action = Some(SettingsViewAction::StartChromiumAutoLogin {
+                                                                    target_account_id: Some(acc.id.clone()),
+                                                                    email: acc.extract_email(),
+                                                                    profile_slug: Some(acc.slug()),
+                                                                    clear_cache: false,
+                                                                });
+                                                            }
+
+                                                            if ui.small_button(RichText::new("📁 Profile").size(10.5).color(TEXT_MUTED)).on_hover_text("Open profile cache folder on disk").clicked() {
+                                                                action = Some(SettingsViewAction::OpenProfileFolder(acc.slug()));
                                                             }
 
                                                             if !acc.org_uuid.is_empty() {
@@ -297,7 +315,12 @@ pub fn render_settings_view(
                                             if ui.add_enabled(!state.is_verifying_account, Button::new(RichText::new(btn_text).size(12.0).color(Color32::WHITE).strong()).fill(ACCENT_PEACH)).clicked() {
                                                 state.is_verifying_account = true;
                                                 let email = if state.auto_login_email.trim().is_empty() { None } else { Some(state.auto_login_email.trim().to_string()) };
-                                                action = Some(SettingsViewAction::StartChromiumAutoLogin(email));
+                                                action = Some(SettingsViewAction::StartChromiumAutoLogin {
+                                                    target_account_id: None,
+                                                    email,
+                                                    profile_slug: None,
+                                                    clear_cache: false,
+                                                });
                                             }
                                         });
                                     });

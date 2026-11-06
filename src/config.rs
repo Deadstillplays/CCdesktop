@@ -23,6 +23,51 @@ pub struct ClaudeAccount {
     pub is_rate_limited: bool,
     #[serde(default)]
     pub rate_limit_reset: Option<String>,
+    #[serde(default)]
+    pub profile_slug: Option<String>,
+}
+
+impl ClaudeAccount {
+    pub fn slug(&self) -> String {
+        if let Some(ref s) = self.profile_slug {
+            if !s.trim().is_empty() {
+                return s.trim().to_string();
+            }
+        }
+        let email_or_name = self.name.split('\'').next().unwrap_or(&self.name).trim();
+        let mut clean = String::new();
+        for c in email_or_name.chars() {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                clean.push(c);
+            } else if c == '@' {
+                clean.push('_');
+            }
+        }
+        if clean.is_empty() {
+            let short_id = if self.id.len() > 8 { &self.id[..8] } else { &self.id };
+            format!("account_{}", short_id)
+        } else {
+            clean
+        }
+    }
+
+    pub fn profile_dir(&self) -> PathBuf {
+        let slug = self.slug();
+        if let Some(roaming) = dirs::config_dir() {
+            roaming.join("ClaudeDesktopRust").join("Profiles").join(slug)
+        } else {
+            PathBuf::from("Profiles").join(slug)
+        }
+    }
+
+    pub fn extract_email(&self) -> Option<String> {
+        let first_part = self.name.split('\'').next().unwrap_or(&self.name).trim();
+        if first_part.contains('@') {
+            Some(first_part.to_string())
+        } else {
+            None
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -275,6 +320,7 @@ impl AppConfig {
                 messages_sent: 0,
                 is_rate_limited: false,
                 rate_limit_reset: None,
+                profile_slug: None,
             });
             self.active_account_id = Some(id);
             modified = true;
@@ -322,6 +368,7 @@ impl AppConfig {
                 messages_sent: 0,
                 is_rate_limited: false,
                 rate_limit_reset: None,
+                profile_slug: None,
             });
         }
         pool
@@ -438,6 +485,44 @@ impl AppConfig {
         self.active_account_id.clone()
     }
 
+    pub fn update_account_session(
+        &mut self,
+        account_id: &str,
+        session_key: &str,
+        org_uuid: Option<&str>,
+        name: Option<&str>,
+        profile_slug: Option<&str>,
+    ) -> bool {
+        let clean_sk = session_key.trim();
+        if let Some(acc) = self.accounts.iter_mut().find(|a| a.id == account_id) {
+            acc.session_key = clean_sk.to_string();
+            if let Some(org) = org_uuid {
+                if !org.trim().is_empty() {
+                    acc.org_uuid = org.trim().to_string();
+                }
+            }
+            if let Some(n) = name {
+                if !n.trim().is_empty() && (acc.name.is_empty() || acc.name == "Claude Account") {
+                    acc.name = n.trim().to_string();
+                }
+            }
+            if let Some(slug) = profile_slug {
+                if !slug.trim().is_empty() {
+                    acc.profile_slug = Some(slug.trim().to_string());
+                }
+            }
+            acc.is_rate_limited = false;
+            acc.rate_limit_reset = None;
+            acc.is_active = true;
+            let id = acc.id.clone();
+            self.set_active_account(&id);
+            let _ = self.save();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn add_or_update_account(&mut self, session_key: &str, org_uuid: &str, name: &str) -> String {
         let clean_sk = session_key.trim();
         if let Some(existing) = self.accounts.iter_mut().find(|a| a.session_key == clean_sk || (!org_uuid.is_empty() && a.org_uuid == org_uuid)) {
@@ -446,6 +531,8 @@ impl AppConfig {
             if !name.is_empty() {
                 existing.name = name.to_string();
             }
+            existing.is_rate_limited = false;
+            existing.rate_limit_reset = None;
             existing.is_active = true;
             let id = existing.id.clone();
             self.set_active_account(&id);
@@ -461,6 +548,7 @@ impl AppConfig {
                 messages_sent: 0,
                 is_rate_limited: false,
                 rate_limit_reset: None,
+                profile_slug: None,
             };
             self.accounts.push(new_acc);
             self.set_active_account(&id);

@@ -15,6 +15,15 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
+pub struct AccountLoginResult {
+    pub target_account_id: Option<String>,
+    pub session_key: String,
+    pub org_uuid: String,
+    pub name: String,
+    pub profile_slug: Option<String>,
+}
+
 pub struct ClaudeDesktopApp {
     pub config: AppConfig,
     pub storage: StorageManager,
@@ -48,8 +57,8 @@ pub struct ClaudeDesktopApp {
     pub tool_test_rx: Receiver<Result<serde_json::Value, String>>,
     pub mcp_sync_tx: Sender<(McpConfigFile, HashMap<String, ServerStatus>, Vec<McpTool>)>,
     pub mcp_sync_rx: Receiver<(McpConfigFile, HashMap<String, ServerStatus>, Vec<McpTool>)>,
-    pub verify_account_tx: Sender<Result<(Option<String>, String, String), String>>,
-    pub verify_account_rx: Receiver<Result<(Option<String>, String, String), String>>,
+    pub verify_account_tx: Sender<Result<AccountLoginResult, String>>,
+    pub verify_account_rx: Receiver<Result<AccountLoginResult, String>>,
     pub batch_validate_tx: Sender<Vec<(String, bool, Option<String>)>>,
     pub batch_validate_rx: Receiver<Vec<(String, bool, Option<String>)>>,
 
@@ -486,14 +495,36 @@ impl ClaudeDesktopApp {
         while let Ok(ver_res) = self.verify_account_rx.try_recv() {
             self.settings_view_state.is_verifying_account = false;
             match ver_res {
-                Ok((maybe_sk, uuid, name)) => {
-                    let sk = maybe_sk.unwrap_or_else(|| self.config.claude_session_key.clone());
-                    self.config.add_or_update_account(&sk, &uuid, &name);
-                    let _ = self.config.save();
-                    self.settings_view_state.toast_message = Some(format!("Connected to: {}", name));
+                Ok(login) => {
+                    if let Some(ref target_id) = login.target_account_id {
+                        let success = self.config.update_account_session(
+                            target_id,
+                            &login.session_key,
+                            if login.org_uuid.is_empty() { None } else { Some(&login.org_uuid) },
+                            if login.name.is_empty() { None } else { Some(&login.name) },
+                            login.profile_slug.as_deref(),
+                        );
+                        if success {
+                            let acc_name = self.config.accounts.iter().find(|a| &a.id == target_id).map(|a| a.name.clone()).unwrap_or(login.name);
+                            self.settings_view_state.toast_message = Some(format!("✅ Re-authenticated account: {}", acc_name));
+                        } else {
+                            let _id = self.config.add_or_update_account(&login.session_key, &login.org_uuid, &login.name);
+                            let _ = self.config.save();
+                            self.settings_view_state.toast_message = Some(format!("✅ Connected to: {}", login.name));
+                        }
+                    } else {
+                        let id = self.config.add_or_update_account(&login.session_key, &login.org_uuid, &login.name);
+                        if let Some(slug) = login.profile_slug {
+                            if let Some(acc) = self.config.accounts.iter_mut().find(|a| a.id == id) {
+                                acc.profile_slug = Some(slug);
+                            }
+                        }
+                        let _ = self.config.save();
+                        self.settings_view_state.toast_message = Some(format!("✅ Connected to: {}", login.name));
+                    }
                 }
                 Err(e) => {
-                    self.settings_view_state.toast_message = Some(format!("Verification failed: {}", e));
+                    self.settings_view_state.toast_message = Some(format!("❌ Verification failed: {}", e));
                 }
             }
         }
@@ -554,21 +585,22 @@ impl ClaudeDesktopApp {
 
     fn spawn_browser_auto_login(
         tokio_runtime: &tokio::runtime::Runtime,
+        target_account_id: Option<String>,
         email: Option<String>,
-        tx: crossbeam_channel::Sender<Result<(Option<String>, String, String), String>>,
+        profile_dir: Option<std::path::PathBuf>,
+        clear_cache: bool,
+        tx: crossbeam_channel::Sender<Result<AccountLoginResult, String>>,
     ) {
         tokio_runtime.spawn(async move {
             let script_path = dirs::config_dir()
                 .map(|d| d.join("ClaudeDesktopRust").join("scripts").join("auto_login.py"))
                 .unwrap_or_else(|| std::path::PathBuf::from("scripts/auto_login.py"));
 
-            if !script_path.exists() {
-                if let Some(parent) = script_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let embedded = include_str!("../scripts/auto_login.py");
-                let _ = std::fs::write(&script_path, embedded);
+            if let Some(parent) = script_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
+            let embedded = include_str!("../scripts/auto_login.py");
+            let _ = std::fs::write(&script_path, embedded);
 
             let mut py_candidates = vec![
                 "python.exe".to_string(),
@@ -591,25 +623,50 @@ impl ClaudeDesktopApp {
             for py in &py_candidates {
                 let mut cmd = std::process::Command::new(py);
                 cmd.arg(&script_path);
+
+                if let Some(ref pdir) = profile_dir {
+                    cmd.arg("--profile-dir");
+                    cmd.arg(pdir.to_string_lossy().to_string());
+                }
+                if let Some(ref acc_id) = target_account_id {
+                    cmd.arg("--account-id");
+                    cmd.arg(acc_id);
+                }
                 if let Some(ref em) = email {
+                    cmd.arg("--email");
                     cmd.arg(em);
                 }
+                if clear_cache {
+                    cmd.arg("--clear");
+                }
+
                 if let Ok(output) = cmd.output() {
-                    if output.status.success() {
-                        let text = String::from_utf8_lossy(&output.stdout);
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if let Some(sk) = v.get("sessionKey").and_then(|s| s.as_str()) {
-                                let sk_str = sk.to_string();
-                                match verify_claude_account(&sk_str).await {
-                                    Ok((uuid, name)) => {
-                                        let _ = tx.send(Ok((Some(sk_str), uuid, name)));
-                                    }
-                                    Err(e) => {
-                                        let _ = tx.send(Err(format!("Extracted cookie, but verification failed: {}", e)));
-                                    }
-                                }
-                                return;
-                            }
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(sk) = v.get("sessionKey").and_then(|s| s.as_str()) {
+                            let sk_str = sk.to_string();
+                            let ret_target_id = v.get("targetAccountId").and_then(|s| s.as_str()).map(|s| s.to_string()).or_else(|| target_account_id.clone());
+                            let ret_org = v.get("orgUuid").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                            let ret_name = v.get("accountName").and_then(|s| s.as_str()).unwrap_or("").to_string();
+
+                            let (uuid, name) = match verify_claude_account(&sk_str).await {
+                                Ok((u, n)) => (u, n),
+                                Err(_) => (ret_org, if ret_name.is_empty() { "Claude Account".to_string() } else { ret_name }),
+                            };
+
+                            let slug = profile_dir.as_ref().and_then(|p| p.file_name()).map(|f| f.to_string_lossy().to_string());
+
+                            let _ = tx.send(Ok(AccountLoginResult {
+                                target_account_id: ret_target_id,
+                                session_key: sk_str,
+                                org_uuid: uuid,
+                                name,
+                                profile_slug: slug,
+                            }));
+                            return;
+                        } else if let Some(err) = v.get("error").and_then(|s| s.as_str()) {
+                            let _ = tx.send(Err(err.to_string()));
+                            return;
                         }
                     }
                 }
@@ -915,7 +972,7 @@ impl eframe::App for ClaudeDesktopApp {
         egui::SidePanel::left("sidebar_panel")
             .resizable(true)
             .default_width(260.0_f32)
-            .min_width(180.0_f32)
+            .min_width(220.0_f32)
             .max_width(450.0_f32)
             .frame(
                 Frame::new()
@@ -1028,7 +1085,13 @@ impl eframe::App for ClaudeDesktopApp {
                                     self.tokio_runtime.spawn(async move {
                                         match verify_claude_account(&sk_clone).await {
                                             Ok((uuid, name)) => {
-                                                let _ = tx.send(Ok((Some(sk_clone), uuid, name)));
+                                                let _ = tx.send(Ok(AccountLoginResult {
+                                                    target_account_id: None,
+                                                    session_key: sk_clone,
+                                                    org_uuid: uuid,
+                                                    name,
+                                                    profile_slug: None,
+                                                }));
                                             }
                                             Err(e) => {
                                                 let _ = tx.send(Err(format!("Verification error: {}", e)));
@@ -1043,11 +1106,27 @@ impl eframe::App for ClaudeDesktopApp {
                             }
                         }
 
+                        if let Some((target_acc_id, email)) = chat_action.relogin_account {
+                            let tx = self.verify_account_tx.clone();
+                            self.settings_view_state.is_verifying_account = true;
+                            let target_profile_dir = self.config.accounts.iter().find(|a| a.id == target_acc_id).map(|a| a.profile_dir());
+                            let target_name = self.config.accounts.iter().find(|a| a.id == target_acc_id).map(|a| a.name.clone()).unwrap_or_else(|| "Account".to_string());
+                            self.settings_view_state.toast_message = Some(format!("🌐 Launching Chromium profile for '{}'... Sign in to refresh session!", target_name));
+                            Self::spawn_browser_auto_login(
+                                &self.tokio_runtime,
+                                Some(target_acc_id),
+                                email,
+                                target_profile_dir,
+                                false,
+                                tx,
+                            );
+                        }
+
                         if chat_action.start_auto_google_login {
                             let tx = self.verify_account_tx.clone();
                             self.settings_view_state.is_verifying_account = true;
                             self.settings_view_state.toast_message = Some("🌐 Launching Chromium browser... Please sign in!".to_string());
-                            Self::spawn_browser_auto_login(&self.tokio_runtime, None, tx);
+                            Self::spawn_browser_auto_login(&self.tokio_runtime, None, None, None, false, tx);
                         }
 
                         if chat_action.open_accounts_file {
@@ -1230,7 +1309,13 @@ impl eframe::App for ClaudeDesktopApp {
                                     match extract_claude_desktop_credentials() {
                                         Ok((sk, _org)) => {
                                             let res = verify_claude_account(&sk).await;
-                                            let _ = tx.send(res.map(|(uuid, name)| (Some(sk), uuid, name)));
+                                            let _ = tx.send(res.map(|(uuid, name)| AccountLoginResult {
+                                                target_account_id: None,
+                                                session_key: sk,
+                                                org_uuid: uuid,
+                                                name,
+                                                profile_slug: None,
+                                            }));
                                         }
                                         Err(e) => {
                                             let _ = tx.send(Err(format!("Auto-sync error: {}", e)));
@@ -1242,13 +1327,34 @@ impl eframe::App for ClaudeDesktopApp {
                                 let tx = self.verify_account_tx.clone();
                                 self.settings_view_state.is_verifying_account = true;
                                 self.settings_view_state.toast_message = Some("🌐 Launching Chromium browser... Please sign in!".to_string());
-                                Self::spawn_browser_auto_login(&self.tokio_runtime, None, tx);
+                                Self::spawn_browser_auto_login(&self.tokio_runtime, None, None, None, false, tx);
                             }
-                            SettingsViewAction::StartChromiumAutoLogin(email) => {
+                            SettingsViewAction::StartChromiumAutoLogin { target_account_id, email, profile_slug, clear_cache } => {
                                 let tx = self.verify_account_tx.clone();
                                 self.settings_view_state.is_verifying_account = true;
-                                self.settings_view_state.toast_message = Some("🌐 Launching Chromium browser... Please sign in!".to_string());
-                                Self::spawn_browser_auto_login(&self.tokio_runtime, email, tx);
+                                let target_profile_dir = if let Some(ref slug) = profile_slug {
+                                    dirs::config_dir().map(|d| d.join("ClaudeDesktopRust").join("Profiles").join(slug))
+                                } else if let Some(ref acc_id) = target_account_id {
+                                    self.config.accounts.iter().find(|a| &a.id == acc_id).map(|a| a.profile_dir())
+                                } else {
+                                    None
+                                };
+                                self.settings_view_state.toast_message = Some("🌐 Launching isolated Chromium profile... Sign in to capture session!".to_string());
+                                Self::spawn_browser_auto_login(
+                                    &self.tokio_runtime,
+                                    target_account_id,
+                                    email,
+                                    target_profile_dir,
+                                    clear_cache,
+                                    tx,
+                                );
+                            }
+                            SettingsViewAction::OpenProfileFolder(slug) => {
+                                if let Some(roaming) = dirs::config_dir() {
+                                    let p = roaming.join("ClaudeDesktopRust").join("Profiles").join(slug);
+                                    let _ = std::fs::create_dir_all(&p);
+                                    let _ = open::that(&p);
+                                }
                             }
                             SettingsViewAction::PasteFromClipboard => {
                                 if let Some(text) = crate::ui::clipboard::ClipboardHelper::get_text() {
@@ -1259,7 +1365,13 @@ impl eframe::App for ClaudeDesktopApp {
                                         self.tokio_runtime.spawn(async move {
                                             match verify_claude_account(&sk_clone).await {
                                                 Ok((uuid, name)) => {
-                                                    let _ = tx.send(Ok((Some(sk_clone), uuid, name)));
+                                                    let _ = tx.send(Ok(AccountLoginResult {
+                                                        target_account_id: None,
+                                                        session_key: sk_clone,
+                                                        org_uuid: uuid,
+                                                        name,
+                                                        profile_slug: None,
+                                                    }));
                                                 }
                                                 Err(e) => {
                                                     let _ = tx.send(Err(format!("Verification error: {}", e)));
@@ -1301,7 +1413,13 @@ impl eframe::App for ClaudeDesktopApp {
                                     match verify_claude_account(&sk_clone).await {
                                         Ok((uuid, verified_name)) => {
                                             let final_name = if !name_clone.is_empty() { name_clone } else { verified_name };
-                                            let _ = tx.send(Ok((Some(sk_clone), uuid, final_name)));
+                                            let _ = tx.send(Ok(AccountLoginResult {
+                                                target_account_id: None,
+                                                session_key: sk_clone,
+                                                org_uuid: uuid,
+                                                name: final_name,
+                                                profile_slug: None,
+                                            }));
                                         }
                                         Err(e) => {
                                             let _ = tx.send(Err(format!("Verification error: {}", e)));
