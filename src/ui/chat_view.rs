@@ -61,6 +61,7 @@ pub struct ChatViewAction {
     pub open_accounts_file: bool,
     pub export_chat_md: bool,
     pub rename_chat: Option<String>,
+    pub clean_expired_accounts: bool,
 }
 
 pub const AVAILABLE_MODELS: &[(&str, &str)] = &[
@@ -101,6 +102,7 @@ pub fn render_chat_view(
         open_accounts_file: false,
         export_chat_md: false,
         rename_chat: None,
+        clean_expired_accounts: false,
     };
 
     // Chat Top Header Bar - Spacious Two-Row Responsive Layout
@@ -234,6 +236,15 @@ pub fn render_chat_view(
                             }
 
                             ui.separator();
+                            let expired_count = config.accounts.iter().filter(|a| a.is_expired()).count();
+                            if expired_count > 0 {
+                                if ui.button(RichText::new(format!("🧹 Purge {} Expired Account(s)", expired_count)).size(11.5).color(Color32::from_rgb(240, 100, 100)).strong()).clicked() {
+                                    action.clean_expired_accounts = true;
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                            }
+
                             ui.label(RichText::new("QUICK LOGIN & ADD").size(10.5).color(TEXT_MUTED).strong());
 
                             if ui.button(RichText::new("🌐 Auto-Login New Account (Chromium)").size(11.5).color(ACCENT_PEACH).strong()).clicked() {

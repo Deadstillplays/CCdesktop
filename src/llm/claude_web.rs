@@ -285,10 +285,11 @@ pub async fn run_claude_web_turn(
         return;
     }
 
-    let current_acc = account_pool[0].clone();
+    let mut current_acc_idx = 0;
+    let mut current_acc = account_pool[0].clone();
 
-    let clean_key = current_acc.session_key.trim().to_string();
-    let cookie_val = if clean_key.starts_with("sessionKey=") {
+    let mut clean_key = current_acc.session_key.trim().to_string();
+    let mut cookie_val = if clean_key.starts_with("sessionKey=") {
         clean_key.clone()
     } else {
         format!("sessionKey={}", clean_key)
@@ -1265,7 +1266,7 @@ pub async fn run_claude_web_turn(
         }
     };
 
-    let headers = build_claude_headers(&cookie_val);
+    let mut headers = build_claude_headers(&cookie_val);
     let mut conv_url = format!("https://claude.ai/api/organizations/{}/chat_conversations", resolved_org);
 
     // If this is a new conversation session, register it on Claude.ai once with a clean title
@@ -1436,7 +1437,66 @@ pub async fn run_claude_web_turn(
             let is_cloudflare_challenge = status.as_u16() == 403 && (err_body.contains("Just a moment") || err_body.contains("Cloudflare"));
             let is_auth_error = status.as_u16() == 401 || (status.as_u16() == 403 && !use_model_param && !is_cloudflare_challenge);
 
-            // No in-turn account cascade. Errors are handled per-turn; app.rs rotates for the NEXT prompt.
+            // In Combined Usage pool, automatically failover to the next ready account if current is limited or expired!
+            if (is_rate_limit || is_auth_error) && combined_usage && current_acc_idx + 1 < account_pool.len() {
+                let old_acc = account_pool[current_acc_idx].clone();
+                current_acc_idx += 1;
+                let next_acc = account_pool[current_acc_idx].clone();
+
+                let reason = if is_auth_error {
+                    Some("Session Expired (403)".to_string())
+                } else {
+                    Some("Rate Limited (429)".to_string())
+                };
+
+                let _ = event_tx.send(TurnEvent::AccountSwitched {
+                    old_name: old_acc.name.clone(),
+                    new_name: next_acc.name.clone(),
+                    new_account_id: next_acc.id.clone(),
+                    reason,
+                });
+
+                // Switch credentials to the next ready account
+                current_acc = next_acc;
+                clean_key = current_acc.session_key.trim().to_string();
+                cookie_val = if clean_key.starts_with("sessionKey=") {
+                    clean_key.clone()
+                } else {
+                    format!("sessionKey={}", clean_key)
+                };
+                resolved_org = current_acc.org_uuid.trim().to_string();
+                if resolved_org.is_empty() {
+                    if let Ok((uuid, _)) = verify_claude_account(&clean_key).await {
+                        resolved_org = uuid;
+                    }
+                }
+
+                headers = build_claude_headers(&cookie_val);
+
+                // Register conversation on new account
+                conversation_id = uuid::Uuid::new_v4().to_string();
+                let _ = event_tx.send(TurnEvent::ConversationCreated(conversation_id.clone()));
+                conv_url = format!("https://claude.ai/api/organizations/{}/chat_conversations", resolved_org);
+                let _ = client
+                    .post(&conv_url)
+                    .headers(headers.clone())
+                    .json(&json!({
+                        "uuid": conversation_id,
+                        "name": "Chat"
+                    }))
+                    .send()
+                    .await;
+
+                comp2_url = format!(
+                    "https://claude.ai/api/organizations/{}/chat_conversations/{}/completion2",
+                    resolved_org, conversation_id
+                );
+
+                concurrency_retries = 0;
+                use_model_param = mapped_model.is_some();
+                continue 'outer;
+            }
+
             if is_concurrency {
                 let _ = event_tx.send(TurnEvent::Error(
                     "Claude.ai concurrency limit reached (Anthropic server is still processing a previous turn). Please wait a few seconds and send your message again.".to_string()

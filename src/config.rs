@@ -60,7 +60,21 @@ impl ClaudeAccount {
         }
     }
 
-    pub fn extract_email(&self) -> Option<String> {
+    
+    pub fn is_expired(&self) -> bool {
+        if self.session_key.trim().is_empty() {
+            return true;
+        }
+        self.rate_limit_reset
+            .as_deref()
+            .map(|s| s.contains("Expired") || s.contains("Invalid") || s.contains("403") || s.contains("401"))
+            .unwrap_or(false)
+    }
+
+    pub fn is_ready(&self) -> bool {
+        !self.is_expired() && !self.is_rate_limited
+    }
+pub fn extract_email(&self) -> Option<String> {
         let first_part = self.name.split('\'').next().unwrap_or(&self.name).trim();
         if first_part.contains('@') {
             Some(first_part.to_string())
@@ -344,7 +358,43 @@ impl AppConfig {
         self.accounts.iter().find(|a| a.is_active).or_else(|| self.accounts.first())
     }
 
-    pub fn get_account_pool(&self) -> Vec<ClaudeAccount> {
+        pub fn get_ready_account_pool(&self) -> Vec<ClaudeAccount> {
+        let count = self.accounts.len();
+        if count == 0 {
+            return self.get_account_pool();
+        }
+
+        let curr_idx = self.accounts.iter().position(|a| a.is_active).unwrap_or(0);
+        let mut pool = Vec::new();
+
+        // Round-robin from current account through all READY accounts (skipping inactive/expired/limited)
+        for step in 0..count {
+            let idx = (curr_idx + step) % count;
+            let acc = &self.accounts[idx];
+            if acc.is_ready() {
+                pool.push(acc.clone());
+            }
+        }
+
+        // If all accounts are currently rate-limited, fall back to non-expired ones
+        if pool.is_empty() {
+            for step in 0..count {
+                let idx = (curr_idx + step) % count;
+                let acc = &self.accounts[idx];
+                if !acc.is_expired() && !acc.session_key.trim().is_empty() {
+                    pool.push(acc.clone());
+                }
+            }
+        }
+
+        if pool.is_empty() {
+            self.get_account_pool()
+        } else {
+            pool
+        }
+    }
+
+pub fn get_account_pool(&self) -> Vec<ClaudeAccount> {
         let mut pool = Vec::new();
         if let Some(active) = self.get_active_account() {
             pool.push(active.clone());
@@ -425,10 +475,7 @@ impl AppConfig {
 
     pub fn remove_expired_accounts(&mut self) -> usize {
         let before = self.accounts.len();
-        self.accounts.retain(|a| {
-            let is_expired = a.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid")).unwrap_or(false);
-            !is_expired
-        });
+        self.accounts.retain(|a| !a.is_expired());
         if !self.accounts.iter().any(|a| a.is_active) {
             if let Some(first) = self.accounts.first() {
                 let id = first.id.clone();
@@ -439,40 +486,35 @@ impl AppConfig {
         before.saturating_sub(self.accounts.len())
     }
 
-    /// Round-robin 1 prompt per account: advances active account to next ready account in the pool
+    /// Round-robin 1 prompt per account: advances active account to next ready account in the pool, strictly skipping inactive/expired ones
     pub fn rotate_to_next_ready_account(&mut self) -> Option<String> {
-        if self.accounts.len() <= 1 {
+        if self.accounts.is_empty() {
             return self.active_account_id.clone();
         }
 
         let curr_idx = self.accounts.iter().position(|a| a.is_active).unwrap_or(0);
         let count = self.accounts.len();
 
-        // 1. Look for next non-rate-limited and non-expired account in round-robin order
+        // 1. Look for next truly ready account in round-robin order
         for step in 1..count {
             let next_idx = (curr_idx + step) % count;
-            let acc = &self.accounts[next_idx];
-            let is_expired = acc.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid")).unwrap_or(false);
-            if !acc.is_rate_limited && !is_expired {
-                let next_id = acc.id.clone();
+            if self.accounts[next_idx].is_ready() {
+                let next_id = self.accounts[next_idx].id.clone();
                 self.set_active_account(&next_id);
                 let _ = self.save();
                 return Some(next_id);
             }
         }
 
-        // 2. If current account itself is not rate-limited and not expired, keep it
-        let cur_acc = &self.accounts[curr_idx];
-        let cur_expired = cur_acc.rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid")).unwrap_or(false);
-        if !cur_acc.is_rate_limited && !cur_expired {
+        // 2. If current account itself is ready, keep it
+        if self.accounts[curr_idx].is_ready() {
             return self.active_account_id.clone();
         }
 
-        // 3. Fallback: find ANY non-expired account (even if previously marked rate-limited) and unmark it
-        for step in 0..count {
+        // 3. Fallback: find any non-expired account (unmark cooldown if all were rate limited)
+        for step in 1..=count {
             let next_idx = (curr_idx + step) % count;
-            let is_expired = self.accounts[next_idx].rate_limit_reset.as_deref().map(|s| s.contains("Expired") || s.contains("Invalid")).unwrap_or(false);
-            if !is_expired {
+            if !self.accounts[next_idx].is_expired() && !self.accounts[next_idx].session_key.trim().is_empty() {
                 self.accounts[next_idx].is_rate_limited = false;
                 let next_id = self.accounts[next_idx].id.clone();
                 self.set_active_account(&next_id);
@@ -481,7 +523,7 @@ impl AppConfig {
             }
         }
 
-        // 4. Default fallback: keep current
+        // 4. Default fallback
         self.active_account_id.clone()
     }
 

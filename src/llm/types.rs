@@ -6,7 +6,7 @@ pub enum TurnEvent {
     ToolDone { id: String, name: String, result: String, is_error: bool },
     TurnComplete { full_text: String },
     Error(String),
-    AccountSwitched { old_name: String, new_name: String, new_account_id: String },
+    AccountSwitched { old_name: String, new_name: String, new_account_id: String, reason: Option<String> },
     HttpSpyUpdate(String),
     ConversationCreated(String),
 }

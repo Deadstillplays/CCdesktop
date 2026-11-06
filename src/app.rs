@@ -195,8 +195,8 @@ impl ClaudeDesktopApp {
         }
 
         if self.config.combined_usage && self.config.accounts.len() > 1 {
-            let is_cur_limited = self.config.get_active_account().map(|a| a.is_rate_limited).unwrap_or(false);
-            if is_cur_limited {
+            let is_cur_not_ready = self.config.get_active_account().map(|a| !a.is_ready()).unwrap_or(false);
+            if is_cur_not_ready {
                 self.config.rotate_to_next_ready_account();
             }
         }
@@ -287,8 +287,15 @@ impl ClaudeDesktopApp {
         let proj_mgr = self.project_mgr.clone();
         let event_tx = self.turn_tx.clone();
         let provider = self.config.provider.clone();
-        // Strict 1-prompt-per-account: only send the active account in the turn pool
-        let account_pool = if let Some(active) = self.config.get_active_account() {
+        // In Combined Usage pool, pass all ready active accounts in round-robin order!
+        let account_pool = if self.config.combined_usage {
+            let pool = self.config.get_ready_account_pool();
+            if pool.is_empty() {
+                self.config.get_account_pool()
+            } else {
+                pool
+            }
+        } else if let Some(active) = self.config.get_active_account() {
             vec![active.clone()]
         } else {
             self.config.get_account_pool()
@@ -456,16 +463,22 @@ impl ClaudeDesktopApp {
                                 }
                             }
                         }
-                        TurnEvent::AccountSwitched { old_name, new_name, new_account_id } => {
+                        TurnEvent::AccountSwitched { old_name, new_name, new_account_id, reason } => {
                             let old_id = self.config.accounts.iter().find(|a| a.name == old_name).map(|a| a.id.clone());
                             if let Some(oid) = old_id {
-                                self.config.set_account_rate_limited(&oid, true, None);
+                                let is_exp = reason.as_deref().map(|r| r.contains("Expired") || r.contains("403")).unwrap_or(false);
+                                let note = if is_exp { Some("Session Expired (403)".to_string()) } else { None };
+                                self.config.set_account_rate_limited(&oid, true, note);
                             }
                             self.config.set_active_account(&new_account_id);
                             let _ = self.config.save();
+                            let cause = match reason.as_deref() {
+                                Some(r) if r.contains("Expired") || r.contains("403") => "Session expired",
+                                _ => "Message limit reached",
+                            };
                             assistant_msg.content.push_str(&format!(
-                                "\n> 🔄 *Combined Usage Pool: Message limit reached on **{}**. Automatically switched to **{}**...*\n\n",
-                                old_name, new_name
+                                "\n> 🔄 *Combined Usage Pool: {} on **{}**. Automatically switched to **{}**...*\n\n",
+                                cause, old_name, new_name
                             ));
                         }
                     }
@@ -1143,6 +1156,11 @@ impl eframe::App for ClaudeDesktopApp {
                                     self.settings_view_state.toast_message = Some(format!("❌ Failed to reload accounts: {}", e));
                                 }
                             }
+                        }
+
+                        if chat_action.clean_expired_accounts {
+                            let count = self.config.remove_expired_accounts();
+                            self.settings_view_state.toast_message = Some(format!("🧹 Purged {} expired account(s) from pool", count));
                         }
 
                         if let Some(quote) = chat_action.quote_message {
